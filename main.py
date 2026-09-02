@@ -89,6 +89,11 @@ def save_position_meta(coin, info):
     POSITIONS_FILE.write_text(json.dumps(meta, indent=2))
 
 
+def set_position_meta(meta):
+    POSITIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    POSITIONS_FILE.write_text(json.dumps(meta, indent=2))
+
+
 def position_report(account):
     meta = load_position_meta()
     rows = []
@@ -161,6 +166,12 @@ def monitor_positions(cfg, mode):
             close = executor.submit_reduce_close(coin, side, sz)
             print(json.dumps({"action": "max_hold_close", "coin": coin,
                               "held_minutes": round(held, 1), "result": close}))
+            m = load_position_meta().get(coin, {})
+            learning_record({"type": "close", "coin": coin, "pnl": float(p.get("unrealized_pnl") or 0),
+                             "entry_px": m.get("entry_px"), "reason": "max_hold",
+                             "close_status": close.get("status"),
+                             "held_minutes": round(held, 1)})
+            meta_all = load_position_meta(); meta_all.pop(coin, None); set_position_meta(meta_all)
             telegram_notify(f"[LIVE] MAX-HOLD CLOSE {coin} held={held:.1f}m uPnL={float(p.get('unrealized_pnl') or 0):+.4f}")
     report_positions(mode, account)
 
@@ -177,6 +188,10 @@ def cycle(coin, cfg, mode, notify=True):
         result = {"coin": coin, "sig": sig, "risk": rd.reasons, "status": "REJECTED",
                   "decision_source": decision_source,
                   "positions": position_report(account)}
+        learning_record({"type": "decision", "coin": coin, "decision": sig.get("decision"),
+                         "side": sig.get("side"), "confidence": sig.get("confidence"),
+                         "reason": sig.get("reason"), "risk": rd.reasons,
+                         "source": decision_source})
         return result
 
     # AI may request closing an existing position.
@@ -190,6 +205,15 @@ def cycle(coin, cfg, mode, notify=True):
             result = {"coin": coin, "sig": sig, "status": "CLOSED",
                       "decision_source": decision_source, "close": closed,
                       "positions": position_report(account)}
+            m = load_position_meta()
+            opened = m.get(coin, {})
+            learning_record({"type": "close", "coin": coin, "pnl": float(p.get("unrealized_pnl") or 0),
+                             "entry_px": opened.get("entry_px", p.get("entry_px")),
+                             "reason": "ai:" + str(sig.get("reason", ""))[:120],
+                             "close_status": closed.get("status"),
+                             "held_minutes": int((time.time() - opened["opened_at"]) / 60) if opened.get("opened_at") else None})
+            m.pop(coin, None)
+            set_position_meta(m)
             telegram_notify(f"[{mode}] CLOSED {coin} uPnL={float(p.get('unrealized_pnl') or 0):+.4f}")
             return result
 
@@ -219,6 +243,8 @@ def cycle(coin, cfg, mode, notify=True):
     if not filled:
         result["status"] = "NO_FILL"
         result["protection"] = "SKIPPED_NO_FILL"
+        learning_record({"type": "no_fill", "coin": coin, "side": sig.get("side"),
+                         "reason": str(sig.get("reason", ""))[:150]})
         return result
 
     result["status"] = "FILLED"
@@ -226,6 +252,10 @@ def cycle(coin, cfg, mode, notify=True):
     if entry_px <= 0:
         entry_px = float(intent_dict["price"])
     result["entry_px"] = entry_px
+    learning_record({"type": "open", "coin": coin, "side": sig.get("side"),
+                     "entry_px": entry_px, "size": intent_dict.get("size"),
+                     "confidence": sig.get("confidence"), "reason": str(sig.get("reason", ""))[:150],
+                     "source": decision_source, "protection": "pending"})
     # Submit native reduce-only TP/SL trigger orders on the live position.
     prot = executor.submit_protection(intent_dict, entry_px)
     result["protection"] = prot.get("status", "unknown")
@@ -339,6 +369,14 @@ def _close(coin, mode):
     side = "buy" if float(p.get("szi") or 0) > 0 else "sell"
     closed = Executor().submit_reduce_close(coin, side, sz)
     ok = closed.get("status") == "ok"
+    m = load_position_meta()
+    opened = m.get(coin, {})
+    learning_record({"type": "close", "coin": coin, "pnl": float(p.get("unrealized_pnl") or 0),
+                     "entry_px": opened.get("entry_px"), "reason": "manual_telegram",
+                     "close_status": closed.get("status"),
+                     "held_minutes": int((time.time() - opened["opened_at"]) / 60) if opened.get("opened_at") else None})
+    if ok:
+        m.pop(coin, None); set_position_meta(m)
     telegram_notify(f"[{mode}] MANUAL CLOSE {coin} sz={sz} "
                     f"uPnL={float(p.get('unrealized_pnl') or 0):+.4f} "
                     f"{'OK' if ok else 'GAGAL: ' + json.dumps(closed)[:200]}")
