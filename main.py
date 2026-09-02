@@ -12,7 +12,8 @@ from executor import Executor, is_live as executor_is_live
 from hyperliquid.utils.types import Cloid
 from reconciler import reconcile, load_local, save_local
 from telegram import (send, send_report, format_decision, format_positions_html,
-                      close_buttons, poll_updates, answer_callback, scan_report_html)
+                      close_buttons, poll_updates, answer_callback, scan_report_html,
+                      edit_message)
 from learning import record as learning_record
 from protection import prices as protection_prices
 from executor import load_env as executor_load_env
@@ -299,6 +300,11 @@ def handle_update(update, mode):
         answer_callback(cbq.get("id"))
         if data.startswith("close:"):
             manual_close(data.split(":", 1)[1], mode)
+        elif data == "refresh":
+            rep = current_positions_report()
+            if rep:
+                edit_message(incoming_chat, cbq["message"]["message_id"],
+                             format_positions_html(rep), close_buttons(rep["positions"]))
 
 
 def manual_close(coin, mode):

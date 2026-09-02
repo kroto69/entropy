@@ -146,11 +146,13 @@ def format_positions_html(rep):
     return "\n".join(lines)
 
 
-def close_buttons(positions):
-    """Build inline keyboard rows: one Close button per open position."""
+def close_buttons(positions, refresh=True):
+    """Build inline keyboard rows: close per position + optional hard refresh."""
     rows = []
     for r in positions:
         rows.append([{"text": "❌ Close " + r["coin"], "callback_data": "close:" + r["coin"]}])
+    if refresh:
+        rows.append([{"text": "🔄 Refresh", "callback_data": "refresh"}])
     return rows
 
 
