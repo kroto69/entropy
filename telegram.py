@@ -59,6 +59,37 @@ def edit_message(chat_id, message_id, text, buttons=None):
     return _call("editMessageText", payload)
 
 
+def scan_report_html(mode, results, rep=None):
+    """Build a single informative HTML scan report with position summary."""
+    lines = [f"🔍 <b>SCAN {len(results)} MARKET</b> | [{mode}]\n"]
+    for r in results:
+        sig = r.get("sig", {})
+        coin = r.get("coin")
+        decision = sig.get("decision", "-")
+        conf = sig.get("confidence", 0)
+        status = r.get("status")
+        icon = {"open": "🟢", "close": "🔴", "skip": "⚪️", "hold": "🟡"}.get(decision, "❓")
+        st = {"FILLED": "✅", "NO_FILL": "⏳", "REJECTED": "⏸️", "CLOSED": "🔻", "ERROR": "🚨"}.get(status, "•")
+        if status == "ERROR":
+            lines.append(f"{icon} <b>{coin}</b>\n   {st} Error: <code>{r.get('error', '')[:80]}</code>")
+            continue
+        conf_bar = "🟩" * max(1, int(conf * 5)) + "▫️" * (5 - max(1, int(conf * 5)))
+        reason = (sig.get("reason") or "").strip()
+        risk = ", ".join(r.get("risk", []))
+        entry = (f"\n   ↳ <b>{sig.get('side', '').upper()}</b> @ {r.get('entry_px', '-')} | fill: {r.get('fill', '-')} | TP/SL: {r.get('protection', '-')}") if r.get("fill") or r.get("protection") else ""
+        lines.append(
+            f"{icon} <b>{coin}</b> → {decision} ({st} {status})\n"
+            f"   Conf: {conf_bar} {conf:.2f}\n"
+            f"   Alas: {reason[:120]}\n"
+            f"   Risk: {risk or '-'}{entry}")
+    if rep:
+        free = float(rep.get("free_collateral", 0))
+        total = sum(float(p.get("u_pnl") or 0) for p in rep["positions"])
+        pos = ", ".join(f"{p['coin']} {p['side']} {float(p.get('u_pnl') or 0):+.2f}" for p in rep["positions"]) or "tidak ada"
+        lines.append(f"\n📊 <b>Posisi:</b> {pos}\n💵 Free: {free:.2f} | PnL: {total:+.2f}")
+    return "\n".join(lines)
+
+
 def format_decision(coin, decision, mode="DRY-RUN"):
     reason = str(decision.get("reason", ""))[:300]
     return f"[{mode}] {coin}\nDecision: {position_emoji(decision.get('decision'))} {decision.get('decision')}\nSide: {side_emoji(decision.get('side'))} {decision.get('side') or '-'}\nConfidence: {decision.get('confidence', 0)}\nReason: {reason}"

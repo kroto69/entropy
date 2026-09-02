@@ -12,7 +12,7 @@ from executor import Executor, is_live as executor_is_live
 from hyperliquid.utils.types import Cloid
 from reconciler import reconcile, load_local, save_local
 from telegram import (send, send_report, format_decision, format_positions_html,
-                      close_buttons, poll_updates, answer_callback)
+                      close_buttons, poll_updates, answer_callback, scan_report_html)
 from learning import record as learning_record
 from protection import prices as protection_prices
 from executor import load_env as executor_load_env
@@ -198,12 +198,16 @@ def cycle(coin, cfg, mode, notify=True):
 
     if not executor_is_live():
         result = Executor().submit_entry(intent_dict)
+        result["coin"] = coin
+        result["sig"] = sig
         result["decision_source"] = decision_source
         result["protection"] = "SKIPPED_DRYRUN"
         return result
 
     executor = Executor()
     result = executor.submit_entry(intent_dict)
+    result["coin"] = coin
+    result["sig"] = sig
     result["decision_source"] = decision_source
     result["protection"] = "SKIPPED_NO_FILL"
 
@@ -220,6 +224,7 @@ def cycle(coin, cfg, mode, notify=True):
     entry_px = float(status.get("filled", {}).get("avgPx", intent_dict["price"]))
     if entry_px <= 0:
         entry_px = float(intent_dict["price"])
+    result["entry_px"] = entry_px
     # Submit native reduce-only TP/SL trigger orders on the live position.
     prot = executor.submit_protection(intent_dict, entry_px)
     result["protection"] = prot.get("status", "unknown")
@@ -368,17 +373,8 @@ def main():
                 cycle_results.append(result)
                 telegram_notify(f"[ERROR] {coin}: {exc}")
 
-        lines = [f"[{mode}] SCAN {len(cycle_results)} markets"]
-        for r in cycle_results:
-            sig = r.get("sig", {})
-            risk = ",".join(r.get("risk", [])) or "-"
-            lines.append(
-                f"{r.get('coin')} decision={sig.get('decision', '-')} "
-                f"side={sig.get('side') or '-'} conf={sig.get('confidence', 0)} "
-                f"status={r.get('status')} risk={risk}")
-            if r.get("fill") or r.get("protection"):
-                lines.append(f"  fill={r.get('fill', '-')} protection={r.get('protection', '-')}")
-        telegram_notify("\n".join(lines))
+        rep = current_positions_report()
+        telegram_notify_html(scan_report_html(mode, cycle_results, rep))
 
         time.sleep(int(cfg["runtime"]["entry_interval_minutes"]) * 60)
 
