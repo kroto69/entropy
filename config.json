@@ -1,0 +1,22 @@
+{
+  "markets": ["io:ANTH", "io:SNDK", "io:NBIS", "io:GPRO"],
+  "strategy": {
+    "decision_mode": "trend",
+    "trend_threshold_pct": 0.5,
+    "min_confidence": 0.65,
+    "max_spread_bps": 25.0,
+    "min_candle_count": 20
+  },
+  "position": {
+    "amount_usdc": 10.5,
+    "leverage": 5,
+    "max_positions": 2,
+    "take_profit_pct": 100.0,
+    "stop_loss_pct": 40.0,
+    "max_hold_minutes": 60
+  },
+  "runtime": {
+    "dry_run": true,
+    "entry_interval_minutes": 10
+  }
+}
