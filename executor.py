@@ -109,7 +109,8 @@ class Executor:
                     "would_call_exchange": False, "would_sign": False}
         from protection import prices
         levels = prices(entry_price, intent["side"], intent["take_profit_pct"],
-                        intent["stop_loss_pct"], price_decimals)
+                        intent["stop_loss_pct"], price_decimals,
+                        leverage=intent.get("leverage", 1))
         is_long = intent["side"] == "buy"
         orders = []
         for label, trigger, tpsl in (("tp", levels["take_profit"], "tp"),

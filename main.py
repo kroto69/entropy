@@ -257,7 +257,8 @@ def cycle(coin, cfg, mode, notify=True):
                      "confidence": sig.get("confidence"), "reason": str(sig.get("reason", ""))[:150],
                      "source": decision_source, "protection": "pending"})
     # Submit native reduce-only TP/SL trigger orders on the live position.
-    prot = executor.submit_protection(intent_dict, entry_px)
+    price_decimals = max(2, int(meta.get("sz_decimals") or 0) + 2) if meta.get("sz_decimals") is not None else 2
+    prot = executor.submit_protection(intent_dict, entry_px, price_decimals=price_decimals)
     result["protection"] = prot.get("status", "unknown")
     result["protection_tp"] = prot.get("tp", prot.get("response"))
     if prot.get("status") == "ok":
