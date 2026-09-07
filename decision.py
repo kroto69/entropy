@@ -86,84 +86,94 @@ def _indicators_snapshot(candles):
 
 
 def fallback_decision(market_meta, book, candles, cfg):
-    """Deterministic heuristic used when AI is unavailable.
+    """Deterministic heuristic using indicators — more robust than pure momentum.
 
-    Multi-signal: regime trend + momentum + RSI + (spread already filtered).
-    Signals must align; confidence scales with agreement. Conservative.
+    Rules:
+    - Skip if delisted, spread too wide, or volatility too low
+    - Open if trend + momentum aligned, RSI not extreme, confidence >= min
+    - Hold if insufficient data or conflicting signals
     """
     strat = cfg["strategy"]
+
+    # Safety filters
     if market_meta.get("is_delisted"):
         return {"decision": "skip", "side": None, "confidence": 0.0,
                 "reason": "market delisted"}
     if book["spread_bps"] > strat["max_spread_bps"]:
         return {"decision": "skip", "side": None, "confidence": 0.0,
                 "reason": f"spread {book['spread_bps']:.2f}bps > max"}
-    f = _candles_features(candles)
-    if not f or f["n"] < strat["min_candle_count"]:
+
+    closes = [float(c.get("c") or c.get("close") or 0) for c in candles]
+    closes = [c for c in closes if c > 0]
+
+    if len(candles) < strat["min_candle_count"]:
         return {"decision": "hold", "side": None, "confidence": 0.0,
                 "reason": "insufficient candles"}
 
-    ind = _indicators_snapshot(candles) or {}
-    regime = ind.get("regime", {})
-    trend = regime.get("trend", "unknown")
-    rsi = ind.get("rsi14")
-    change = f["change_pct"]
+    # Calculate indicators (indicators return aligned lists -> take latest with [-1])
+    ema20 = calculate_ema(closes, 20)[-1] if len(closes) >= 20 else None
+    ema50 = calculate_ema(closes, 50)[-1] if len(closes) >= 50 else None
+    rsi14 = calculate_rsi(closes, 14)[-1] if len(closes) >= 15 else None
+    atr14 = calculate_atr(candles, 14)[-1] if len(candles) >= 15 else None
+
+    # Momentum
+    f = _candles_features(candles) or {}
+    change_pct = f.get("change_pct", 0)
+
+    # Trend detection (price above EMA20 = bull, not the inverse)
+    trend = "neutral"
+    if ema20 is not None and ema50 is not None:
+        trend = "bull" if ema20 > ema50 else "bear"
+    elif ema20 is not None and closes:
+        trend = "bull" if closes[-1] > ema20 else "bear"
+
     threshold = float(strat.get("trend_threshold_pct", 0.5))
+    min_conf = float(strat.get("min_confidence", 0.65))
 
-    # --- Momentum signal ---
-    if change > threshold:
-        side = "buy"
-    elif change < -threshold:
-        side = "sell"
-    else:
+    # RSI filter
+    rsi_extreme = False
+    if rsi14 is not None:
+        rsi_extreme = (rsi14 > 75 or rsi14 < 25)
+
+    # Volatility filter
+    low_vol = False
+    if atr14 is not None and closes:
+        atr_pct = (atr14 / closes[-1]) * 100
+        low_vol = (atr_pct < 0.3)  # too quiet, skip
+
+    if low_vol:
+        return {"decision": "skip", "side": None, "confidence": 0.0,
+                "reason": "volatility too low"}
+
+    if rsi_extreme:
         return {"decision": "hold", "side": None, "confidence": 0.5,
-                "reason": f"trend below threshold {threshold}% (change {change:.2f}%)"}
+                "reason": f"RSI extreme ({rsi14:.1f})"}
 
-    # --- Build multi-signal score (each aligned signal adds confidence) ---
-    signals = 0
-    total = 0
-    reasons = [f"momentum {change:+.2f}%"]
+    if abs(change_pct) < threshold:
+        return {"decision": "hold", "side": None, "confidence": 0.5,
+                "reason": f"trend below threshold {threshold}%"}
 
-    # Signal 1: momentum direction (already matches `side` by construction)
-    signals += 1
-    total += 1
+    # Align trend + momentum
+    side = "buy" if change_pct > 0 else "sell"
+    if trend == "bear" and change_pct > 0:
+        return {"decision": "hold", "side": None, "confidence": 0.4,
+                "reason": "momentum vs trend conflict"}
+    if trend == "bull" and change_pct < 0:
+        return {"decision": "hold", "side": None, "confidence": 0.4,
+                "reason": "momentum vs trend conflict"}
 
-    # Signal 2: regime trend agrees
-    total += 1
-    if trend == ("bull" if side == "buy" else "bear"):
-        signals += 1
-        reasons.append(f"regime {trend}")
-    else:
-        reasons.append(f"regime {trend} (conflict)")
+    # Confidence based on alignment
+    base_conf = min_conf
+    if trend != "neutral":
+        base_conf += 0.1
+    if rsi14 is not None and 30 <= rsi14 <= 70:
+        base_conf += 0.05
 
-    # Signal 3: RSI confirms (not overbought for buy / not oversold for sell)
-    total += 1
-    if rsi is not None:
-        if side == "buy" and rsi < 70:
-            signals += 1
-            reasons.append(f"rsi {rsi:.0f} confirms")
-        elif side == "sell" and rsi > 30:
-            signals += 1
-            reasons.append(f"rsi {rsi:.0f} confirms")
-        else:
-            reasons.append(f"rsi {rsi:.0f} overextended")
-    else:
-        reasons.append("rsi n/a")
-
-    # Confidence: base + agreement ratio, capped at 0.8 (heuristic never max)
-    base = float(strat["min_confidence"])
-    conf = min(0.8, base + 0.1 * signals - 0.1 * (total - signals))
-
-    # Fail-closed: if fewer than 2 signals agree, don't open
-    if signals < 2:
-        return {"decision": "hold", "side": None, "confidence": round(conf, 3),
-                "reason": "signals conflict: " + "; ".join(reasons)}
-    if conf < base:
-        return {"decision": "hold", "side": None, "confidence": round(conf, 3),
-                "reason": "confidence below threshold: " + "; ".join(reasons)}
+    conf = min(0.9, base_conf + abs(change_pct) / 100)
+    rsi_str = f"{rsi14:.1f}" if rsi14 is not None else "N/A"
 
     return {"decision": "open", "side": side, "confidence": round(conf, 3),
-            "reason": "; ".join(reasons)}
+            "reason": f"{trend} trend + momentum {change_pct:.2f}%, RSI {rsi_str}"}
 
 
 def validate_ai_decision(raw, market_meta, book, cfg):
