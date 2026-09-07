@@ -118,10 +118,15 @@ def format_positions_html(rep):
     if not rep["positions"]:
         lines.append("📭 Belum ada posisi.\n⏳ Menunggu sinyal entry berikutnya...")
         return "\n".join(lines)
+    margin_tot = sum(float(r.get("margin_used") or 0) for r in rep["positions"])
+    notional_tot = sum(abs(float(r.get("entry_px") or 0) * float(r.get("size") or 0)) for r in rep["positions"])
+    lev_x = (notional_tot / margin_tot) if margin_tot else 0
     lines[0] = (
         f"📊 <b>PORTOFOLIO</b>  |  💵 {acv:.2f} USDC\n"
         f"📈 Posisi: <b>{rep['open_positions']}</b>  |  "
         f"🎯 Equity PnL: <b>{total_pnl:+.4f} USDC</b> {pnl_emoji(total_pnl)}\n"
+        f"🧱 Modal (margin): <b>{margin_tot:.2f} USDC</b>  |  "
+        f"⚡ Equity Lev: <b>{notional_tot:.2f} USDC</b> ({lev_x:.1f}x)\n"
         f"{'─' * 22}")
     for r in rep["positions"]:
         pnl = float(r["u_pnl"] or 0)
