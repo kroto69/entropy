@@ -1,7 +1,9 @@
 """Order intent builder. No signing, no network, no /exchange."""
 from dataclasses import dataclass, asdict
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 import time, uuid
+
+MIN_NOTIONAL = Decimal("10")  # Hyperliquid minimum order value, all perp markets
 
 @dataclass(frozen=True)
 class OrderIntent:
@@ -29,7 +31,15 @@ def build_entry(coin, signal, market, book, cfg):
     amount = Decimal(str(cfg["position"]["amount_usdc"]))
     px = Decimal(str(book["ask_px"] if signal["side"] == "buy" else book["bid_px"]))
     size = _round_down(amount / px, market["sz_decimals"])
+    # Rounding down can drop notional below exchange minimum ($10) -> round up instead.
+    if px * Decimal(size) < MIN_NOTIONAL:
+        size_up = (amount / px).quantize(Decimal(1).scaleb(-int(market["sz_decimals"])), rounding=ROUND_UP)
+        # A single sz-step must not overshoot the intended size wildly; else amount is too small.
+        if px * Decimal(size_up) > amount * 2:
+            raise ValueError(f"amount_usdc too small for {coin}: one sz-step overshoots notional to {px * Decimal(size_up)}")
+        size = str(size_up)
     if Decimal(size) <= 0: raise ValueError("rounded size is zero")
+    if px * Decimal(size) < MIN_NOTIONAL: raise ValueError(f"notional below minimum ${MIN_NOTIONAL}: increase amount_usdc")
     lev = int(cfg["position"].get("leverage", 1))
     cloid = "0x" + uuid.uuid4().hex  # valid 16-byte cloid for fill tracking
     return OrderIntent(cloid, coin, signal["side"], size, str(px),
