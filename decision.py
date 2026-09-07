@@ -88,7 +88,8 @@ def _indicators_snapshot(candles):
 def fallback_decision(market_meta, book, candles, cfg):
     """Deterministic heuristic used when AI is unavailable.
 
-    Simple momentum+spread filter; intentionally conservative.
+    Multi-signal: regime trend + momentum + RSI + (spread already filtered).
+    Signals must align; confidence scales with agreement. Conservative.
     """
     strat = cfg["strategy"]
     if market_meta.get("is_delisted"):
@@ -101,14 +102,68 @@ def fallback_decision(market_meta, book, candles, cfg):
     if not f or f["n"] < strat["min_candle_count"]:
         return {"decision": "hold", "side": None, "confidence": 0.0,
                 "reason": "insufficient candles"}
+
+    ind = _indicators_snapshot(candles) or {}
+    regime = ind.get("regime", {})
+    trend = regime.get("trend", "unknown")
+    rsi = ind.get("rsi14")
+    change = f["change_pct"]
     threshold = float(strat.get("trend_threshold_pct", 0.5))
-    if abs(f["change_pct"]) < threshold:
+
+    # --- Momentum signal ---
+    if change > threshold:
+        side = "buy"
+    elif change < -threshold:
+        side = "sell"
+    else:
         return {"decision": "hold", "side": None, "confidence": 0.5,
-                "reason": f"trend below threshold {threshold}%"}
-    side = "buy" if f["change_pct"] > 0 else "sell"
-    conf = min(0.9, strat["min_confidence"] + abs(f["change_pct"]) / 100)
+                "reason": f"trend below threshold {threshold}% (change {change:.2f}%)"}
+
+    # --- Build multi-signal score (each aligned signal adds confidence) ---
+    signals = 0
+    total = 0
+    reasons = [f"momentum {change:+.2f}%"]
+
+    # Signal 1: momentum direction (already matches `side` by construction)
+    signals += 1
+    total += 1
+
+    # Signal 2: regime trend agrees
+    total += 1
+    if trend == ("bull" if side == "buy" else "bear"):
+        signals += 1
+        reasons.append(f"regime {trend}")
+    else:
+        reasons.append(f"regime {trend} (conflict)")
+
+    # Signal 3: RSI confirms (not overbought for buy / not oversold for sell)
+    total += 1
+    if rsi is not None:
+        if side == "buy" and rsi < 70:
+            signals += 1
+            reasons.append(f"rsi {rsi:.0f} confirms")
+        elif side == "sell" and rsi > 30:
+            signals += 1
+            reasons.append(f"rsi {rsi:.0f} confirms")
+        else:
+            reasons.append(f"rsi {rsi:.0f} overextended")
+    else:
+        reasons.append("rsi n/a")
+
+    # Confidence: base + agreement ratio, capped at 0.8 (heuristic never max)
+    base = float(strat["min_confidence"])
+    conf = min(0.8, base + 0.1 * signals - 0.1 * (total - signals))
+
+    # Fail-closed: if fewer than 2 signals agree, don't open
+    if signals < 2:
+        return {"decision": "hold", "side": None, "confidence": round(conf, 3),
+                "reason": "signals conflict: " + "; ".join(reasons)}
+    if conf < base:
+        return {"decision": "hold", "side": None, "confidence": round(conf, 3),
+                "reason": "confidence below threshold: " + "; ".join(reasons)}
+
     return {"decision": "open", "side": side, "confidence": round(conf, 3),
-            "reason": f"momentum {f['change_pct']:.2f}% over {f['n']} candles"}
+            "reason": "; ".join(reasons)}
 
 
 def validate_ai_decision(raw, market_meta, book, cfg):
