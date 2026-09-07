@@ -134,6 +134,8 @@ def format_positions_html(rep):
         sz = abs(float(r["size"] or 0))
         mark = float(r.get("mark_px") or entry)
         margin = float(r["margin_used"] or 0)
+        notional = entry * sz
+        lev = (notional / margin) if margin else 0
         roe = (pnl / margin * 100) if margin else 0
         move = ((mark - entry) / entry * 100) if entry else 0
         arrow = "🟢" if pnl >= 0 else "🔴"
@@ -145,7 +147,7 @@ def format_positions_html(rep):
             f"   ↳ Entry <code>{entry:.4g}</code> → Mark <code>{mark:.4g}</code> "
             f"({move:+.2f}%)\n"
             f"   💰 PnL: <b>{pnl:+.4f} USDC</b> ({roe:+.1f}% ROE)\n"
-            f"   ⏱ {held} | 🧱 {margin:.2f} | 📦 {entry * sz:.2f} USDC{liq_txt}\n"
+            f"   ⏱ {held} | 💵 Entry USD: <b>{notional:.2f}</b> | 🧱 Margin: <b>{margin:.2f}</b> | ⚡ Lev: <b>{lev:.1f}x</b>{liq_txt}\n"
             f"   🎯 TP <code>{r['tp'] or '-'}</code> | 🛑 SL <code>{r['sl'] or '-'}</code>")
     lines.append(f"\n💵 Free: <b>{rep['free_collateral']:.2f} USDC</b>")
     return "\n".join(lines)
