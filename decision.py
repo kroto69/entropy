@@ -139,7 +139,7 @@ def fallback_decision(market_meta, book, candles, cfg):
     low_vol = False
     if atr14 is not None and closes:
         atr_pct = (atr14 / closes[-1]) * 100
-        low_vol = (atr_pct < 0.3)  # too quiet, skip
+        low_vol = (atr_pct < 0.1)  # too quiet, skip (adjusted for io:* 15m)
 
     if low_vol:
         return {"decision": "skip", "side": None, "confidence": 0.0,
