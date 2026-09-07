@@ -18,6 +18,7 @@ def check(signal, market, book, account, cfg):
     if book.get("spread_bps", 1e9) > float(strategy["max_spread_bps"]): reasons.append("spread_too_wide")
     if market.get("only_isolated") is not True: reasons.append("isolated_mode_not_confirmed")
     if len(account.get("positions", [])) >= int(pos.get("max_positions", 1)): reasons.append("position_limit")
+    if any(p.get("coin") == signal.get("coin") for p in account.get("positions", [])): reasons.append("already_positioned")
     free = float(account.get("free_collateral", 0))
     amount = float(pos["amount_usdc"])
     lev = max(1, int(pos.get("leverage", 1)))

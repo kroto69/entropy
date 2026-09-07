@@ -183,6 +183,7 @@ def cycle(coin, cfg, mode, notify=True):
     address = os.getenv("HL_ACCOUNT_ADDRESS")
     account = account_summary(address) if address else {"free_collateral": 0, "positions": []}
     sig, decision_source = decide(coin, meta, book, candles, cfg, account)
+    sig["coin"] = coin  # risk gate per-coin position check
     rd = risk_check(sig, meta, book, account, cfg)
     if not rd.allowed:
         result = {"coin": coin, "sig": sig, "risk": rd.reasons, "status": "REJECTED",

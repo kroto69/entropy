@@ -132,6 +132,16 @@ class Executor:
         out = {"status": status, "action": action, "response": resp}
         if status not in ("ok",):
             out["error"] = resp.get("response", resp)
+            return out
+        # Top-level "ok" hides per-order errors in statuses[] (e.g. bulk trigger orders).
+        try:
+            statuses = resp["response"]["data"]["statuses"]
+            errors = [s.get("error") for s in statuses if isinstance(s, dict) and "error" in s]
+            if errors:
+                out["status"] = "error"
+                out["error"] = errors
+        except (KeyError, TypeError):
+            pass
         return out
 
 
