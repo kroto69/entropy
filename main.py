@@ -3,7 +3,7 @@ import os, sys, time, json, traceback, threading
 from pathlib import Path
 
 from core.resolver import resolve_market
-from core.market_data import book_view, candles_snapshot, account_summary
+from core.market_data import book_view, candles_snapshot, account_summary, tick_decimals, exchange_protection
 from strategy.decision import load_config, fallback_decision, validate_ai_decision, build_prompt_context
 from strategy.ai import decide
 from core.risk import check as risk_check
@@ -96,6 +96,13 @@ def set_position_meta(meta):
 
 def position_report(account):
     meta = load_position_meta()
+    addr = os.getenv("HL_ACCOUNT_ADDRESS")
+    exch_prot = []
+    if addr:
+        try:
+            exch_prot = exchange_protection(addr, dex="io")
+        except Exception:
+            exch_prot = []
     rows = []
     for p in account.get("positions", []):
         coin = p.get("coin")
@@ -108,12 +115,26 @@ def position_report(account):
         px = mark or entry
         # Recompute PnL from live mark so Telegram matches the web (not a stale snapshot).
         pnl = ((px - entry) * szi) if px else float(p.get("unrealized_pnl") or 0)
+        # TP/SL from live exchange reduce-only orders (truth), not local meta.
+        tp = sl = None
+        levels = [o["limit_px"] for o in exch_prot if o.get("coin") == coin]
+        if levels:
+            above = sorted([x for x in levels if x >= entry])
+            below = sorted([x for x in levels if x < entry])
+            if szi > 0:  # long: TP above, SL below
+                tp = above[-1] if above else None
+                sl = below[0] if below else None
+            else:        # short: TP below, SL above
+                tp = below[0] if below else None
+                sl = above[-1] if above else None
+        if tp is None: tp = m.get("tp")
+        if sl is None: sl = m.get("sl")
         rows.append({"coin": coin, "side": "long" if szi > 0 else "short",
                      "size": szi, "entry_px": entry, "mark_px": px,
                      "u_pnl": pnl, "u_pnl_exch": p.get("unrealized_pnl"),
                      "margin_used": p.get("margin_used"),
                      "liq_px": p.get("liquidation_px"),
-                     "held_minutes": held_min, "tp": m.get("tp"), "sl": m.get("sl")})
+                     "held_minutes": held_min, "tp": tp, "sl": sl})
     return {"open_positions": len(rows), "positions": rows,
             "free_collateral": account.get("free_collateral", 0),
             "account_value": account.get("account_value", 0)}
@@ -147,6 +168,40 @@ def report_positions(mode, account=None):
     return rep
 
 
+def ensure_live_protection(cfg, account):
+    """Every open position MUST have full-size native TP/SL. Repair if missing/undersized."""
+    if not executor_is_live():
+        return
+    executor = Executor()
+    pos_cfg = cfg["position"]
+    tp_pct = str(pos_cfg["take_profit_pct"])
+    sl_pct = str(pos_cfg["stop_loss_pct"])
+    leverage = int(pos_cfg.get("leverage", 1))
+    try:
+        prot = exchange_protection(os.getenv("HL_ACCOUNT_ADDRESS"), dex="io")
+    except Exception as exc:
+        print(f"ensure_live_protection: cannot read exchange orders: {exc}")
+        return
+    for p in account.get("positions", []):
+        coin = p.get("coin")
+        szi = abs(float(p.get("szi") or 0))
+        if szi <= 0:
+            continue
+        # Correct protection = TP + SL, each full size => total reduce-only size
+        # is 2x position. Require both sides (TP and SL) present, else repair.
+        hedged = sum(o["sz"] for o in prot if o.get("coin") == coin)
+        if hedged >= 2 * szi - 1e-9:
+            continue
+        side = "buy" if float(p.get("szi") or 0) > 0 else "sell"
+        entry = float(p.get("entry_px") or 0)
+        intent = {"coin": coin, "side": side, "size": str(szi),
+                  "take_profit_pct": tp_pct, "stop_loss_pct": sl_pct,
+                  "leverage": leverage}
+        out = executor.submit_protection(intent, entry, price_decimals=tick_decimals(coin))
+        print(json.dumps({"action": "auto_repair_protection", "coin": coin,
+                          "position_sz": szi, "hedged_sz": hedged, "result": out}))
+
+
 def monitor_positions(cfg, mode):
     """Report live PnL and close positions exceeding max hold; TP/SL stays native."""
     address = os.getenv("HL_ACCOUNT_ADDRESS")
@@ -156,6 +211,7 @@ def monitor_positions(cfg, mode):
     meta = load_position_meta()
     executor = Executor() if executor_is_live() else None
     max_hold = int(cfg["position"].get("max_hold_minutes", 0))
+    ensure_live_protection(cfg, account)
     for p in account.get("positions", []):
         coin = p.get("coin")
         opened_at = meta.get(coin, {}).get("opened_at")
@@ -258,7 +314,7 @@ def cycle(coin, cfg, mode, notify=True):
                      "confidence": sig.get("confidence"), "reason": str(sig.get("reason", ""))[:150],
                      "source": decision_source, "protection": "pending"})
     # Submit native reduce-only TP/SL trigger orders on the live position.
-    price_decimals = max(2, int(meta.get("sz_decimals") or 0) + 2) if meta.get("sz_decimals") is not None else 2
+    price_decimals = tick_decimals(coin)
     prot = executor.submit_protection(intent_dict, entry_px, price_decimals=price_decimals)
     result["protection"] = prot.get("status", "unknown")
     result["protection_tp"] = prot.get("tp", prot.get("response"))

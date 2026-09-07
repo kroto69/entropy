@@ -93,7 +93,10 @@ class Executor:
         return self._checked(resp, "entry")
 
     def submit_protection(self, intent, entry_price, price_decimals=2):
-        """Submit native TP/SL trigger orders after confirmed entry fill."""
+        """Submit native TP/SL trigger orders after confirmed entry fill.
+
+        Replaces any existing reduce-only trigger orders on the coin first,
+        so size increases never leave the excess unhedged."""
         if not is_live():
             return {"status": "SIMULATED", "coin": intent["coin"], "reduce_only": True,
                     "would_call_exchange": False, "would_sign": False}
@@ -101,6 +104,15 @@ class Executor:
         levels = prices(entry_price, intent["side"], intent["take_profit_pct"],
                         intent["stop_loss_pct"], price_decimals,
                         leverage=intent.get("leverage", 1))
+        # Cancel stale reduce-only orders on this coin (e.g. prior partial-size TP/SL).
+        try:
+            existing = self.info.open_orders(self.account_address, dex="io")
+            cancels = [{"coin": o["coin"], "oid": o["oid"]}
+                       for o in existing if o.get("coin") == intent["coin"] and o.get("reduceOnly")]
+            if cancels:
+                self.exchange.bulk_cancel(cancels)
+        except Exception as exc:
+            return {"status": "error", "action": "protection", "error": f"cancel-stale-failed: {exc}"}
         is_long = intent["side"] == "buy"
         orders = []
         for label, trigger, tpsl in (("tp", levels["take_profit"], "tp"),

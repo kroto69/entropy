@@ -36,6 +36,36 @@ def open_orders(address, timeout=20):
     return _info({"type": "frontendOpenOrders", "user": address}, timeout=timeout)
 
 
+def open_orders_dex(address, dex="io", timeout=20):
+    """Raw openOrders (resting) for a dex, incl. reduce-only TP/SL trigger orders."""
+    if not address or not address.startswith("0x") or len(address) != 42:
+        raise DataError(f"invalid address: {address!r}")
+    return _info({"type": "openOrders", "user": address, "dex": dex}, timeout=timeout)
+
+
+def exchange_protection(address, dex="io", timeout=20):
+    """Map coin -> {tp, sl} from live reduce-only trigger orders.
+
+    TP/SL are reduce-only: for a long both are sells (side B), TP above entry,
+    SL below. For a short both are buys (side A), TP below, SL above. We key off
+    entry/side supplied by the caller, so here we return raw levels and let the
+    caller label them. Returns list of per-coin reduce-only orders.
+    """
+    orders = open_orders_dex(address, dex=dex, timeout=timeout)
+    out = []
+    for o in orders or []:
+        if not o.get("reduceOnly"):
+            continue
+        out.append({
+            "coin": o.get("coin"),
+            "limit_px": float(o.get("limitPx") or 0),
+            "sz": float(o.get("sz") or 0),
+            "side": o.get("side"),
+            "oid": o.get("oid"),
+        })
+    return out
+
+
 def user_fills(address, timeout=20):
     if not address or not address.startswith("0x") or len(address) != 42:
         raise DataError(f"invalid address: {address!r}")
@@ -81,6 +111,19 @@ def book_view(coin, depth=5):
         "bids": bids[:depth],
         "asks": asks[:depth],
     }
+
+
+def tick_decimals(coin, timeout=20):
+    """Infer tick size decimals from l2 book prices (io dex meta lacks tickSize)."""
+    try:
+        raw = l2_book(coin, timeout=timeout)
+        pxs = [lvl["px"] for side in (raw.get("levels") or []) for lvl in (side or [])]
+        if not pxs:
+            return 2
+        dp = max((len(p.split(".")[1]) if "." in p else 0) for p in pxs)
+        return dp if dp > 0 else 2
+    except Exception:
+        return 2
 
 
 def account_summary(address, dex="io"):

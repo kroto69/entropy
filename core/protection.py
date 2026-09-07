@@ -11,7 +11,7 @@ def prices(entry, side, tp_pct, sl_pct, price_decimals=2, leverage=1):
     Guard: SL is capped at 60% of the liquidation distance (1/leverage),
     so SL always triggers before liquidation.
     """
-    e = Decimal(str(entry)); lev = max(1, int(leverage))
+    e = Decimal(str(entry)); lev = max(Decimal("1"), Decimal(str(leverage)))
     tp = Decimal(str(tp_pct)) / 100 / lev
     sl = Decimal(str(sl_pct)) / 100 / lev
     # liquidation approx distance = 1/leverage; SL must stay well inside it
