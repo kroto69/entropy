@@ -7,6 +7,8 @@ This module produces decisions only; it cannot place orders.
 import json
 from pathlib import Path
 
+from indicators import calculate_ema, calculate_rsi, calculate_atr
+
 VALID = ("open", "close", "hold", "skip")
 
 
@@ -31,6 +33,56 @@ def _candles_features(candles):
         "last": closes[-1],
         "change_pct": (closes[-1] - closes[0]) / closes[0] * 100,
     }
+
+
+def _indicators_snapshot(candles):
+    """Latest indicator values + regime detection from candles."""
+    if not candles or len(candles) < 15:
+        return None
+    ema20 = calculate_ema(candles, 20)
+    ema50 = calculate_ema(candles, 50)
+    rsi14 = calculate_rsi(candles, 14)
+    atr14 = calculate_atr(candles, 14)
+    closes = [float(c.get("close") or c.get("c") or 0) for c in candles]
+    closes = [c for c in closes if c > 0]
+    if not closes:
+        return None
+    last = closes[-1]
+    e20 = ema20[-1]
+    e50 = ema50[-1]
+    r = rsi14[-1]
+    a = atr14[-1]
+    snap = {
+        "ema20": round(e20, 6) if e20 else None,
+        "ema50": round(e50, 6) if e50 else None,
+        "rsi14": round(r, 2) if r else None,
+        "atr14": round(a, 6) if a else None,
+        "atr_pct": round(a / last * 100, 3) if a and last else None,
+    }
+    # Regime: trend from EMA relation, vol from ATR% of price
+    if e20 and e50:
+        if e20 > e50 * 1.002:
+            trend = "bull"
+        elif e20 < e50 * 0.998:
+            trend = "bear"
+        else:
+            trend = "range"
+    elif e20 and last:
+        # EMA50 unavailable (short lookback): fall back to EMA20 vs price
+        if last > e20 * 1.002:
+            trend = "bull"
+        elif last < e20 * 0.998:
+            trend = "bear"
+        else:
+            trend = "range"
+    else:
+        trend = "unknown"
+    if snap["atr_pct"] is not None:
+        vol = "high" if snap["atr_pct"] > 2.0 else ("low" if snap["atr_pct"] < 0.5 else "normal")
+    else:
+        vol = "unknown"
+    snap["regime"] = {"trend": trend, "volatility": vol}
+    return snap
 
 
 def fallback_decision(market_meta, book, candles, cfg):
@@ -99,6 +151,7 @@ def build_prompt_context(coin, market_meta, book, candles, account=None, news=No
     for c in (candles or [])[-20:]:
         rows.append({k: c.get(k) for k in ("t", "T", "o", "h", "l", "c", "v") if k in c})
     positions = (account or {}).get("positions", [])
+    ind = _indicators_snapshot(candles)
     return {
         "coin": coin,
         "max_leverage": market_meta.get("max_leverage"),
@@ -107,6 +160,7 @@ def build_prompt_context(coin, market_meta, book, candles, account=None, news=No
         "spread_bps": book["spread_bps"],
         "order_book": {"bids": book.get("bids", [])[:5], "asks": book.get("asks", [])[:5]},
         "candles": {"count": f.get("n", 0), "change_pct": round(f.get("change_pct", 0), 3), "recent": rows},
+        "indicators": ind or {},
         "account": {"free_collateral": (account or {}).get("free_collateral", 0), "positions": positions},
         "news": (news or [])[:5],
         "allowed_decisions": list(VALID),
