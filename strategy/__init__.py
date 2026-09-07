@@ -1,0 +1,1 @@
+"""Strategy package: AI decision engine + indicators + heuristics."""

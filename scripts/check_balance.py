@@ -3,14 +3,7 @@ import os
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
-
-def load_env(path="/entropy/.env"):
-    if os.path.exists(path):
-        for line in open(path):
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                key, value = line.split("=", 1)
-                os.environ.setdefault(key.strip(), value.strip())
+from core.env import load_env
 
 
 def mask(address):

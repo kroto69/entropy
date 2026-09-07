@@ -23,7 +23,7 @@ def meta(delisted=False):
 
 
 def main():
-    from decision import fallback_decision
+    from strategy.decision import fallback_decision
 
     # 1. Gentle bull: rising with pullbacks keeps RSI below 75, momentum up -> open buy
     raw = [100.0]

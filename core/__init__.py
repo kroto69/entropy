@@ -1,0 +1,1 @@
+"""Core package: exchange/network boundary + order/risk primitives."""

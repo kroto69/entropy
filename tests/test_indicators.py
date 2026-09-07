@@ -6,7 +6,7 @@ def _c(close, high=None, low=None):
 
 
 def main():
-    from indicators import calculate_ema, calculate_rsi, calculate_atr
+    from strategy.indicators import calculate_ema, calculate_rsi, calculate_atr
 
     # 1. Rising trend
     up = [_c(float(i)) for i in range(1, 61)]

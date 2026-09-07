@@ -7,19 +7,29 @@ Live loop: scan market → keputusan AI/heuristik → risk gate → entry IOC �
 ## Arsitektur
 
 ```
-main.py        Loop utama + monitor posisi + Telegram command listener
-resolver.py    Resolusi market io:* dari metadata Hyperliquid (read-only)
-market_data.py Data market: L2 book, candles, account state (read-only)
-decision.py    Konteks prompt + heuristik fallback + validasi keputusan AI
-ai.py          Adapter AI ([OI]-compatible chat endpoint, output JSON ketat)
-risk.py        Risk gate deterministik, fail-closed
-planner.py     Pembuat intent order (size, harga, cloid)
-executor.py    Eksekusi order via Hyperliquid Python SDK (perp_dexs=["io"])
-protection.py  Kalkulasi harga TP/SL dari entry
-reconciler.py  Rekonsiliasi state lokal vs exchange
-learning.py    Log belajar append-only
-telegram.py    Notifikasi + laporan HTML + inline keyboard + command polling
-check_balance.py Cek saldo/posisi DEX io (diagnostik)
+main.py          Loop utama + monitor posisi + Telegram command listener
+core/
+  resolver.py    Resolusi market io:* dari metadata Hyperliquid (read-only)
+  market_data.py Data market: L2 book, candles, account state (read-only)
+  planner.py     Pembuat intent order (size, harga, cloid)
+  executor.py    Eksekusi order via Hyperliquid Python SDK (perp_dexs=["io"])
+  protection.py  Kalkulasi harga TP/SL dari entry
+  reconciler.py  Rekonsiliasi state lokal vs exchange
+  risk.py        Risk gate deterministik, fail-closed
+  env.py         Loader .env kanonikal (satu sumber)
+strategy/
+  decision.py    Konteks prompt + heuristik fallback + validasi keputusan AI
+  ai.py          Adapter AI ([OI]-compatible chat endpoint, output JSON ketat)
+  indicators/    EMA, RSI, ATR (pure stdlib)
+report/
+  learning.py    Log belajar append-only
+  telegram.py    Notifikasi + laporan HTML + inline keyboard + command polling
+scripts/
+  check_balance.py     Cek saldo/posisi DEX io (diagnostik)
+  learning_report.py   Ringkasan win/loss + alasan AI
+tests/
+  test_indicators.py   Self-check indicators
+  test_fallback.py     Self-check heuristik fallback
 ```
 
 ## Setup
@@ -136,7 +146,10 @@ AI tidak pernah menentukan amount/leverage/TP/SL/asset — semua dari config. AI
 ```bash
 pm2 logs entropy-bot --lines 50    # lihat log
 pm2 restart entropy-bot            # restart
-./check_balance.py                 # saldo & posisi DEX io
+python3 -m scripts.check_balance   # saldo & posisi DEX io
+python3 -m scripts.learning_report # ringkasan win/loss + alasan AI
+python3 -m tests.test_indicators   # self-check indicators
+python3 -m tests.test_fallback     # self-check fallback
 ```
 
 Log delivery Telegram terlihat di stdout:

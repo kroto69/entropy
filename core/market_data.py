@@ -4,7 +4,7 @@ import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
-from resolver import INFO_URL, _info, resolve_market
+from core.resolver import INFO_URL, _info, resolve_market
 
 STALE_SEC = 30
 

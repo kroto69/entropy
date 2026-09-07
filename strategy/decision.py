@@ -7,7 +7,7 @@ This module produces decisions only; it cannot place orders.
 import json
 from pathlib import Path
 
-from indicators import calculate_ema, calculate_rsi, calculate_atr
+from strategy.indicators import calculate_ema, calculate_rsi, calculate_atr
 
 VALID = ("open", "close", "hold", "skip")
 
@@ -235,8 +235,8 @@ def build_prompt_context(coin, market_meta, book, candles, account=None, news=No
 
 if __name__ == "__main__":
     import sys
-    from market_data import book_view, candles_snapshot
-    from resolver import resolve_market
+    from core.market_data import book_view, candles_snapshot
+    from core.resolver import resolve_market
 
     coin = sys.argv[1] if len(sys.argv) > 1 else "io:SNDK"
     cfg = load_config()

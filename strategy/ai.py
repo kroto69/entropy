@@ -9,18 +9,13 @@ import urllib.request
 
 
 def _load_env():
-    path = "/entropy/.env"
-    if os.path.exists(path):
-        for line in open(path):
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                key, value = line.split("=", 1)
-                os.environ.setdefault(key.strip(), value.strip())
+    from core.env import load_env as _load
+    _load("/entropy/.env")
 
 
 _load_env()
 
-from decision import build_prompt_context, fallback_decision, validate_ai_decision
+from strategy.decision import build_prompt_context, fallback_decision, validate_ai_decision
 
 SYSTEM_PROMPT = (
     "You are a quantitative trading decision engine for perpetual DEX markets (io:* on Hyperliquid). "
@@ -146,7 +141,7 @@ def recent_context(coin=None, limit=8):
     and which skips missed a move — and adjust confidence accordingly.
     """
     try:
-        from learning import read_all
+        from report.learning import read_all
         rows = read_all()
     except Exception:
         return []

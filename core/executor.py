@@ -16,18 +16,8 @@ class ExecutorError(RuntimeError):
 
 
 def load_env(path="/entropy/.env"):
-    vals = {}
-    if os.path.exists(path):
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                vals[k.strip()] = v.strip()
-    # .env is the source of truth (PM2 may carry stale shell env).
-    for k, v in vals.items():
-        os.environ[k] = v
+    from core.env import load_env as _load
+    return _load(path)
 
 
 def is_live():
@@ -107,7 +97,7 @@ class Executor:
         if not is_live():
             return {"status": "SIMULATED", "coin": intent["coin"], "reduce_only": True,
                     "would_call_exchange": False, "would_sign": False}
-        from protection import prices
+        from core.protection import prices
         levels = prices(entry_price, intent["side"], intent["take_profit_pct"],
                         intent["stop_loss_pct"], price_decimals,
                         leverage=intent.get("leverage", 1))

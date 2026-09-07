@@ -1,7 +1,7 @@
 """Learning log analyzer: summarize decisions, outcomes, and reasons."""
 import sys
 from collections import Counter
-from learning import read_all
+from report.learning import read_all
 
 
 def main():
