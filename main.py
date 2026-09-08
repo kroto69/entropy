@@ -187,19 +187,19 @@ def ensure_live_protection(cfg, account):
         szi = abs(float(p.get("szi") or 0))
         if szi <= 0:
             continue
-        # Correct protection = TP + SL, each full size => total reduce-only size
-        # is 2x position. Require both sides (TP and SL) present, else repair.
-        hedged = sum(o["sz"] for o in prot if o.get("coin") == coin)
-        if hedged >= 2 * szi - 1e-9:
-            continue
-        side = "buy" if float(p.get("szi") or 0) > 0 else "sell"
         entry = float(p.get("entry_px") or 0)
+        orders = [o for o in prot if o.get("coin") == coin]
+        correct_tp = [o for o in orders if o["limit_px"] >= entry and abs(o["sz"] - szi) < 1e-6]
+        correct_sl = [o for o in orders if o["limit_px"] < entry and abs(o["sz"] - szi) < 1e-6]
+        if correct_tp and correct_sl and len(orders) == 2:
+            continue  # exactly one full-size TP above + one full-size SL below
+        side = "buy" if float(p.get("szi") or 0) > 0 else "sell"
         intent = {"coin": coin, "side": side, "size": str(szi),
                   "take_profit_pct": tp_pct, "stop_loss_pct": sl_pct,
                   "leverage": leverage}
         out = executor.submit_protection(intent, entry, price_decimals=tick_decimals(coin))
         print(json.dumps({"action": "auto_repair_protection", "coin": coin,
-                          "position_sz": szi, "hedged_sz": hedged, "result": out}))
+                          "position_sz": szi, "orders": orders, "result": out}))
 
 
 def monitor_positions(cfg, mode):
@@ -305,10 +305,15 @@ def cycle(coin, cfg, mode, notify=True):
         return result
 
     result["status"] = "FILLED"
-    entry_px = float(status.get("filled", {}).get("avgPx", intent_dict["price"]))
+    filled_obj = status.get("filled", {})
+    entry_px = float(filled_obj.get("avgPx") or intent_dict["price"] or 0)
     if entry_px <= 0:
         entry_px = float(intent_dict["price"])
     result["entry_px"] = entry_px
+    # Protect the ACTUAL filled size, not the request size (IOC can partial-fill).
+    actual_sz = filled_obj.get("totalSz")
+    if actual_sz:
+        intent_dict["size"] = str(actual_sz)
     learning_record({"type": "open", "coin": coin, "side": sig.get("side"),
                      "entry_px": entry_px, "size": intent_dict.get("size"),
                      "confidence": sig.get("confidence"), "reason": str(sig.get("reason", ""))[:150],

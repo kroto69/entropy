@@ -8,7 +8,7 @@
     "min_candle_count": 20
   },
   "position": {
-    "amount_usdc": 10.5,
+    "amount_usdc": 30.5,
     "leverage": 5,
     "max_positions": 2,
     "take_profit_pct": 8.0,

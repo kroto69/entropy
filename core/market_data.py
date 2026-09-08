@@ -44,13 +44,7 @@ def open_orders_dex(address, dex="io", timeout=20):
 
 
 def exchange_protection(address, dex="io", timeout=20):
-    """Map coin -> {tp, sl} from live reduce-only trigger orders.
-
-    TP/SL are reduce-only: for a long both are sells (side B), TP above entry,
-    SL below. For a short both are buys (side A), TP below, SL above. We key off
-    entry/side supplied by the caller, so here we return raw levels and let the
-    caller label them. Returns list of per-coin reduce-only orders.
-    """
+    """Return raw reduce-only trigger orders, including original size."""
     orders = open_orders_dex(address, dex=dex, timeout=timeout)
     out = []
     for o in orders or []:
