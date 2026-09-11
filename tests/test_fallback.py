@@ -1,13 +1,16 @@
 """Self-check for fallback_decision heuristics. Run: python3 test_fallback.py"""
 
 
-def _c(close, high=None, low=None):
-    return {"c": close, "h": high if high is not None else close, "l": low if low is not None else close}
+def _c(close, high=None, low=None, o=None):
+    return {"o": o if o is not None else close, "c": close,
+            "h": high if high is not None else close,
+            "l": low if low is not None else close}
 
 
 CFG = {
     "strategy": {"trend_threshold_pct": 0.5, "min_confidence": 0.65,
-                 "max_spread_bps": 25.0, "min_candle_count": 20},
+                 "max_spread_bps": 25.0, "min_candle_count": 20,
+                 "max_ema_extension_pct": 2.0},
     "position": {},
     "runtime": {},
 }

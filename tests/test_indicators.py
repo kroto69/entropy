@@ -13,6 +13,13 @@ def main():
     assert calculate_ema(up, 20)[-1] is not None, "EMA rising should compute"
     assert calculate_ema(up, 20)[-1] > 30, "EMA should trend up"
 
+    # 1b. EMA50 available when >= 50 closed candles exist
+    ff = [_c(float(i)) for i in range(1, 52)]  # 51 candles
+    e50 = calculate_ema(ff, 50)
+    assert e50[-1] is not None, "EMA50 should compute with >=50 candles"
+    assert calculate_ema(ff, 50)[48] is None, "EMA50 undefined before 50th candle"
+    assert calculate_ema(ff, 50)[49] is not None, "EMA50 defined at 50th candle"
+
     # 2. RSI overbought on monotonic rise
     r = calculate_rsi(up, 14)
     assert r[-1] is not None and r[-1] > 70, f"RSI rising should be >70, got {r[-1]}"

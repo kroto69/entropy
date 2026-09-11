@@ -1,22 +1,21 @@
 {
-  "markets": ["io:ANTH", "io:SNDK", "io:NBIS", "io:GPRO","io:OAI"],
-  "strategy": {
-    "decision_mode": "trend",
-    "trend_threshold_pct": 0.5,
+  "markets": ["io:ANTH", "io:SNDK", "io:NBIS", "io:GPRO", "io:OAI"],
+  "strategy": "ai",
+  "ai_mode": "primary",
+  "strategy_params": {
     "min_confidence": 0.65,
-    "max_spread_bps": 25.0,
-    "min_candle_count": 20
+    "max_spread_bps": 25.0
   },
   "position": {
     "amount_usdc": 30.5,
     "leverage": 5,
     "max_positions": 2,
-    "take_profit_pct": 8.0,
-    "stop_loss_pct": 3.0,
-    "max_hold_minutes": 60
+    "take_profit_pct": 10.0,
+    "stop_loss_pct": 20.0,
+    "max_hold_minutes": 240
   },
   "runtime": {
     "dry_run": true,
-    "entry_interval_minutes": 17
+    "entry_interval_minutes": 30
   }
 }

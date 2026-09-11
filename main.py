@@ -5,7 +5,10 @@ from pathlib import Path
 from core.resolver import resolve_market
 from core.market_data import book_view, candles_snapshot, account_summary, tick_decimals, exchange_protection
 from strategy.decision import load_config, fallback_decision, validate_ai_decision, build_prompt_context
-from strategy.ai import decide
+from strategy.ai import decide, position_ai_decision, ai_configured
+from strategy.ai import recent_context as ai_recent_context
+from strategy.indicators.price_action import closed_candles
+from strategy.indicators.price_action import candle_ohlc
 from core.risk import check as risk_check
 from core.planner import build_entry, simulate, as_dict
 from core.executor import Executor, is_live as executor_is_live
@@ -13,14 +16,19 @@ from hyperliquid.utils.types import Cloid
 from core.reconciler import reconcile, load_local, save_local
 from report.telegram import (send, send_report, format_decision, format_positions_html,
                       close_buttons, poll_updates, answer_callback, scan_report_html,
-                      edit_message)
+                      edit_message, esc)
 from report.learning import record as learning_record
 from core.protection import prices as protection_prices
 from core.env import load_env as executor_load_env
 
 executor_load_env()
 CYCLE_INTERVAL = 10 * 60
+SCREENING_INTERVAL_SECONDS = 20 * 60
+POSITION_MONITOR_TICK_SECONDS = 60
 _close_lock = threading.Lock()
+_position_last_candle = {}
+_position_close_lock = threading.Lock()  # prevents screening/monitor double-close races
+_position_last_report = 0.0
 
 
 def confirm_fill(executor, intent_dict, timeout_s=15):
@@ -202,8 +210,74 @@ def ensure_live_protection(cfg, account):
                           "position_sz": szi, "orders": orders, "result": out}))
 
 
+def _position_ai_tick(cfg, mode, account):
+    """Run Position AI once per newly closed 15m candle; close remains reduce-only."""
+    global _position_last_candle
+    if cfg.get("strategy") != "ai" or cfg.get("ai_mode") != "primary":
+        return
+    for p in position_report(account).get("positions", []):
+        coin = p["coin"]
+        try:
+            candles = candles_snapshot(coin)
+            closed = closed_candles(candles)
+            if not closed:
+                continue
+            candle_id = closed[-1].get("T", closed[-1].get("t"))
+            if candle_id is None or candle_id == _position_last_candle.get(coin):
+                continue
+            timing = candles_snapshot(coin, interval="5m", lookback_minutes=60)
+            market = resolve_market(coin)
+            book = book_view(coin)
+            sig = position_ai_decision(coin, p, market, book, candles, timing, cfg,
+                                       account=account, context=ai_recent_context(coin))
+            _position_last_candle[coin] = candle_id
+            row = {"type": "position_decision", "strategy": "ai_position", "coin": coin,
+                   "decision": sig["decision"], "confidence": sig["confidence"],
+                   "reason": sig["reason"], "u_pnl": p.get("u_pnl"),
+                   "entry_px": p.get("entry_px"), "mark_px": p.get("mark_px"),
+                   "held_minutes": p.get("held_minutes"), "candle_id": candle_id}
+            learning_record(row)
+            print(json.dumps({"position_pipeline": True, **row,
+                              "hard_tp": p.get("tp"), "hard_sl": p.get("sl"),
+                              "executor_eligible": sig["decision"] == "close"}))
+            telegram_notify_html(
+                f"📊 <b>POSITION AI</b>\n<b>{esc(coin)}</b> {esc(str(p['side']).upper())}\n"
+                f"Decision: <b>{esc(sig['decision'].upper())}</b> | uPnL: {float(p.get('u_pnl') or 0):+.4f}\n"
+                f"Reason: {esc(sig['reason'])}\nHard TP/SL: {esc(str(p.get('tp') or '-'))} / {esc(str(p.get('sl') or '-'))}\n"
+                f"Action: {esc('reduce-only close' if sig['decision'] == 'close' else 'keep position')}")
+            if sig["decision"] != "close":
+                continue
+            # Re-read state under one lock. Never reverse, add, or close stale size.
+            with _position_close_lock:
+                fresh = account_summary(os.getenv("HL_ACCOUNT_ADDRESS"))
+                live_pos = next((x for x in fresh.get("positions", []) if x.get("coin") == coin), None)
+                if not live_pos:
+                    continue
+                size = abs(float(live_pos.get("szi") or 0))
+                if size <= 0:
+                    continue
+                side = "buy" if float(live_pos.get("szi") or 0) > 0 else "sell"
+                if not executor_is_live():
+                    close_result = {"status": "SIMULATED", "would_call_exchange": False,
+                                    "would_sign": False, "reduce_only": True}
+                else:
+                    close_result = Executor().submit_reduce_close(coin, side, size)
+                learning_record({"type": "position_close_intent", "strategy": "ai_position",
+                                 "coin": coin, "decision": "close", "reason": sig["reason"],
+                                 "pnl": live_pos.get("unrealized_pnl"),
+                                 "close_status": close_result.get("status"),
+                                 "simulated": not executor_is_live()})
+                print(json.dumps({"position_close": True, "coin": coin,
+                                  "result": close_result, "no_order": not executor_is_live()}))
+        except Exception as exc:
+            print(f"[position_ai] ERROR for {coin}: {type(exc).__name__}: {exc}")
+            learning_record({"type": "position_error", "strategy": "ai_position",
+                             "coin": coin, "reason": f"{type(exc).__name__}: {exc}"})
+            _position_last_candle[coin] = locals().get("candle_id", _position_last_candle.get(coin))
+
+
 def monitor_positions(cfg, mode):
-    """Report live PnL and close positions exceeding max hold; TP/SL stays native."""
+    """Tick every minute: native protection + Position AI on each new 15m close."""
     address = os.getenv("HL_ACCOUNT_ADDRESS")
     if not address:
         return
@@ -212,6 +286,8 @@ def monitor_positions(cfg, mode):
     executor = Executor() if executor_is_live() else None
     max_hold = int(cfg["position"].get("max_hold_minutes", 0))
     ensure_live_protection(cfg, account)
+    if account.get("positions"):
+        _position_ai_tick(cfg, mode, account)
     for p in account.get("positions", []):
         coin = p.get("coin")
         opened_at = meta.get(coin, {}).get("opened_at")
@@ -222,13 +298,6 @@ def monitor_positions(cfg, mode):
             close = executor.submit_reduce_close(coin, side, sz)
             print(json.dumps({"action": "max_hold_close", "coin": coin,
                               "held_minutes": round(held, 1), "result": close}))
-            m = load_position_meta().get(coin, {})
-            learning_record({"type": "close", "coin": coin, "pnl": float(p.get("unrealized_pnl") or 0),
-                             "entry_px": m.get("entry_px"), "reason": "max_hold",
-                             "close_status": close.get("status"),
-                             "held_minutes": round(held, 1)})
-            meta_all = load_position_meta(); meta_all.pop(coin, None); set_position_meta(meta_all)
-            telegram_notify(f"[LIVE] MAX-HOLD CLOSE {coin} held={held:.1f}m uPnL={float(p.get('unrealized_pnl') or 0):+.4f}")
     report_positions(mode, account)
 
 
@@ -236,11 +305,30 @@ def cycle(coin, cfg, mode, notify=True):
     meta = resolve_market(coin)
     book = book_view(coin)
     candles = candles_snapshot(coin)
+    try:
+        timing_candles = candles_snapshot(coin, interval="5m", lookback_minutes=60)
+    except Exception:
+        # Missing 5m data must fail closed after any primary open signal.
+        timing_candles = []
     address = os.getenv("HL_ACCOUNT_ADDRESS")
     account = account_summary(address) if address else {"free_collateral": 0, "positions": []}
-    sig, decision_source = decide(coin, meta, book, candles, cfg, account)
+    strategy_mode = cfg.get("strategy")
+    ai_mode = cfg.get("ai_mode")
+    sig, decision_source = decide(coin, meta, book, candles, cfg, account,
+                                  timing_candles=timing_candles)
     sig["coin"] = coin  # risk gate per-coin position check
+    ai_called = decision_source in ("ai", "ai_primary", "ai_veto", "ai_veto_agree",
+                                    "ai_veto_error", "ai_primary_error")
     rd = risk_check(sig, meta, book, account, cfg)
+    print(json.dumps({"pipeline": True, "coin": coin, "strategy": strategy_mode,
+                      "ai_mode": ai_mode, "ai_called": ai_called,
+                      "ai_decision": sig.get("decision"), "ai_side": sig.get("side"),
+                      "validator_source": decision_source,
+                      "risk_allowed": rd.allowed, "risk_reasons": list(rd.reasons),
+                      "final_decision": sig.get("decision") if rd.allowed else "REJECTED",
+                      "executor_eligible": bool(rd.allowed and sig.get("decision") == "open"),
+                      "fail_closed_reason": (None if rd.allowed else list(rd.reasons)) or
+                                            (sig.get("reason") if sig.get("decision") != "open" else None)}))
     if not rd.allowed:
         result = {"coin": coin, "sig": sig, "risk": rd.reasons, "status": "REJECTED",
                   "decision_source": decision_source,
@@ -459,31 +547,45 @@ def telegram_command_thread(mode):
                 traceback.print_exc()
 
 
+def screening_cycle(cfg, mode):
+    """20m screening pass: scan all markets, then one scan report."""
+    cycle_results = []
+    for coin in cfg["markets"]:
+        try:
+            result = cycle(coin, cfg, mode, notify=False)
+            cycle_results.append(result)
+            print(json.dumps(result, indent=2))
+        except Exception as exc:
+            traceback.print_exc()
+            result = {"coin": coin, "status": "ERROR", "error": str(exc)}
+            cycle_results.append(result)
+            telegram_notify(f"[ERROR] {coin}: {exc}")
+    rep = current_positions_report()
+    telegram_notify_html(scan_report_html(mode, cycle_results, rep))
+
+
 def main():
     cfg = load_config()
-    live = executor_is_live() and os.getenv("DRY_RUN", "true").lower() == "false"
+    live = bool(cfg.get("runtime", {}).get("dry_run") is False) and executor_is_live() and os.getenv("DRY_RUN", "true").lower() == "false"
     mode = "LIVE" if live else "DRY-RUN"
-    print(f"mode={mode} interval={cfg['runtime']['entry_interval_minutes']}m markets={cfg['markets']}")
+    print(f"mode={mode} screening={SCREENING_INTERVAL_SECONDS // 60}m "
+          f"position_tick={POSITION_MONITOR_TICK_SECONDS}s markets={cfg['markets']}")
     if os.getenv("TELEGRAM_BOT_TOKEN"):
         threading.Thread(target=telegram_command_thread, args=(mode,), daemon=True).start()
+    next_screening = 0.0
     while True:
-        monitor_positions(cfg, mode)
-        cycle_results = []
-        for coin in cfg["markets"]:
+        now = time.time()
+        try:
+            monitor_positions(cfg, mode)
+        except Exception:
+            traceback.print_exc()
+        if now >= next_screening:
             try:
-                result = cycle(coin, cfg, mode, notify=False)
-                cycle_results.append(result)
-                print(json.dumps(result, indent=2))
-            except Exception as exc:
+                screening_cycle(cfg, mode)
+            except Exception:
                 traceback.print_exc()
-                result = {"coin": coin, "status": "ERROR", "error": str(exc)}
-                cycle_results.append(result)
-                telegram_notify(f"[ERROR] {coin}: {exc}")
-
-        rep = current_positions_report()
-        telegram_notify_html(scan_report_html(mode, cycle_results, rep))
-
-        time.sleep(int(cfg["runtime"]["entry_interval_minutes"]) * 60)
+            next_screening = time.time() + SCREENING_INTERVAL_SECONDS
+        time.sleep(POSITION_MONITOR_TICK_SECONDS)
 
 
 if __name__ == "__main__":

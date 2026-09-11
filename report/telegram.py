@@ -1,4 +1,5 @@
 """Telegram notifications + inline keyboard reports + command polling."""
+import html
 import json
 import os
 import threading
@@ -7,6 +8,15 @@ import urllib.parse
 import urllib.request
 
 API = "https://api.telegram.org/bot{token}/{method}"
+
+
+def esc(text):
+    """Escape dynamic/external text for Telegram HTML parse_mode.
+
+    Static template tags are added by callers AFTER escaping their own dynamic
+    values, so intentional <b>/<code>/etc. are never escaped at the boundary.
+    """
+    return html.escape("" if text is None else str(text), quote=True)
 
 
 def _call(method, payload, token=None):
@@ -61,31 +71,31 @@ def edit_message(chat_id, message_id, text, buttons=None):
 
 def scan_report_html(mode, results, rep=None):
     """Build a single informative HTML scan report with position summary."""
-    lines = [f"🔍 <b>SCAN {len(results)} MARKET</b> | [{mode}]\n"]
+    lines = [f"🔍 <b>SCAN {len(results)} MARKET</b> | [{esc(mode)}]\n"]
     for r in results:
         sig = r.get("sig", {})
-        coin = r.get("coin")
+        coin = esc(r.get("coin"))
         decision = sig.get("decision", "-")
         conf = sig.get("confidence", 0)
         status = r.get("status")
         icon = {"open": "🟢", "close": "🔴", "skip": "⚪️", "hold": "🟡"}.get(decision, "❓")
         st = {"FILLED": "✅", "NO_FILL": "⏳", "REJECTED": "⏸️", "CLOSED": "🔻", "ERROR": "🚨"}.get(status, "•")
         if status == "ERROR":
-            lines.append(f"{icon} <b>{coin}</b>\n   {st} Error: <code>{r.get('error', '')[:80]}</code>")
+            lines.append(f"{icon} <b>{coin}</b>\n   {st} Error: <code>{esc(str(r.get('error', '')))[:80]}</code>")
             continue
         conf_bar = "🟩" * max(1, int(conf * 5)) + "▫️" * (5 - max(1, int(conf * 5)))
-        reason = (sig.get("reason") or "").strip()
-        risk = ", ".join(r.get("risk", []))
-        entry = (f"\n   ↳ <b>{sig.get('side', '').upper()}</b> @ {r.get('entry_px', '-')} | fill: {r.get('fill', '-')} | TP/SL: {r.get('protection', '-')}") if r.get("fill") or r.get("protection") else ""
+        reason = esc(sig.get("reason") or "").strip()
+        risk = esc(", ".join(r.get("risk", [])))
+        entry = (f"\n   ↳ <b>{esc(str(sig.get('side', ''))).upper()}</b> @ {r.get('entry_px', '-')} | fill: {r.get('fill', '-')} | TP/SL: {r.get('protection', '-')}") if r.get("fill") or r.get("protection") else ""
         lines.append(
-            f"{icon} <b>{coin}</b> → {decision} ({st} {status})\n"
+            f"{icon} <b>{coin}</b> → {esc(str(decision))} ({st} {esc(str(status))})\n"
             f"   Conf: {conf_bar} {conf:.2f}\n"
             f"   Alas: {reason[:120]}\n"
             f"   Risk: {risk or '-'}{entry}")
     if rep:
         free = float(rep.get("free_collateral", 0))
         total = sum(float(p.get("u_pnl") or 0) for p in rep["positions"])
-        pos = ", ".join(f"{p['coin']} {p['side']} {float(p.get('u_pnl') or 0):+.2f}" for p in rep["positions"]) or "tidak ada"
+        pos = ", ".join(f"{esc(p['coin'])} {esc(str(p['side']))} {float(p.get('u_pnl') or 0):+.2f}" for p in rep["positions"]) or "tidak ada"
         lines.append(f"\n📊 <b>Posisi:</b> {pos}\n💵 Free: {free:.2f} | PnL: {total:+.2f}")
     return "\n".join(lines)
 
@@ -143,12 +153,12 @@ def format_positions_html(rep):
         liq = r.get("liq_px")
         liq_txt = f" | 💀 {float(liq):.4g}" if liq else ""
         lines.append(
-            f"\n{arrow} <b>{r['coin']}</b> {r['side'].upper()} x{sz:g}\n"
+            f"\n{arrow} <b>{esc(r['coin'])}</b> {esc(r['side']).upper()} x{sz:g}\n"
             f"   ↳ Entry <code>{entry:.4g}</code> → Mark <code>{mark:.4g}</code> "
             f"({move:+.2f}%)\n"
             f"   💰 PnL: <b>{pnl:+.4f} USDC</b> ({roe:+.1f}% ROE)\n"
             f"   ⏱ {held} | 💵 Entry USD: <b>{notional:.2f}</b> | 🧱 Margin: <b>{margin:.2f}</b> | ⚡ Lev: <b>{lev:.1f}x</b>{liq_txt}\n"
-            f"   🎯 TP <code>{r['tp'] or '-'}</code> | 🛑 SL <code>{r['sl'] or '-'}</code>")
+            f"   🎯 TP <code>{esc(str(r['tp'] or '-'))}</code> | 🛑 SL <code>{esc(str(r['sl'] or '-'))}</code>")
     lines.append(f"\n💵 Free: <b>{rep['free_collateral']:.2f} USDC</b>")
     return "\n".join(lines)
 

@@ -1,0 +1,1 @@
+"""Strategy packages. Only OHLC is implemented; rsi/ema/composite are placeholders."""

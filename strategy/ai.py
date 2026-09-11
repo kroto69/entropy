@@ -5,6 +5,8 @@ Amount/TP/SL/asset never come from AI. Fallback: local heuristic.
 """
 import json
 import os
+import time
+import urllib.error
 import urllib.request
 
 
@@ -15,72 +17,83 @@ def _load_env():
 
 _load_env()
 
-from strategy.decision import build_prompt_context, fallback_decision, validate_ai_decision
+from strategy.decision import (build_prompt_context, fallback_decision,
+                                validate_ai_decision, build_ai_market_snapshot)
 
 SYSTEM_PROMPT = (
-    "You are a quantitative trading decision engine for perpetual DEX markets (io:* on Hyperliquid). "
-    "Your job is to analyze price action, momentum, and market structure to decide: open, close, hold, or skip.\n"
-    "\n"
-    "DECISION FRAMEWORK:\n"
-    "- TREND: Analyze candle sequence in 'candles.recent'. Higher highs + higher lows = bullish uptrend. "
-    "Lower highs + lower lows = bearish downtrend. Use 'candles.change_pct' for overall momentum.\n"
-    "- MOMENTUM: Consecutive candles closing in same direction = strong momentum. "
-    "Long wicks against the move = rejection/weakness. Large bodies = conviction.\n"
-    "- SPREAD: Check 'spread_bps'. If >25 bps, entry quality is poor → lower confidence or skip.\n"
-    "- BOOK LIQUIDITY: Look at 'order_book' depth. Thin book = slippage risk, be conservative.\n"
-    "- ACCOUNT STATE: Check 'account.positions' count vs max_positions from config. "
-    "If already at max, prefer close/hold/skip over new open.\n"
-    "- FREE COLLATERAL: Ensure 'account.free_collateral' can support new position (amount/leverage from config).\n"
-    "- RISK MANAGEMENT: If setup unclear, spread too wide, book thin, or account at max positions → "
-        "lower confidence or skip. Never force a trade.\n"
-        "- ENTRY TIMING RULES (apply before opening any position):\n"
-        "  1. Do not chase a large upward or downward impulse.\n"
-        "  2. LONG: skip after a sharp pump followed by a large bearish candle, long upper wicks, "
-        "a failed breakout, or price far above its trend mean.\n"
-        "  3. SHORT: skip after a sharp dump followed by a large bullish candle, long lower wicks, "
-        "a failed breakdown, or price far below its trend mean.\n"
-        "  4. Prefer breakout-and-retest: after a breakout, wait for price to hold/reclaim the "
-        "breakout level before opening.\n"
-        "  5. Treat recent candle highs/lows as support/resistance. Do not open long when TP path is "
-        "blocked by a nearby recent high; do not open short when blocked by a nearby recent low.\n"
-        "  6. If the move is extended, choose hold or skip. Missing a trade beats entering late.\n"
-        "\n"
-        "- SELF-CORRECTION: You will see 'recent_track_record' with your past decisions and outcomes (PnL, reasons). "
-    "If skipped setups would have won, be less conservative next time. Learn from your mistakes.\n"
-    "\n"
-    "INPUT YOU WILL RECEIVE (JSON):\n"
-    "- coin: market name (e.g., io:ANTH)\n"
-    "- max_leverage: max leverage allowed for this market\n"
-    "- margin_mode: margin mode (e.g., cross/isolated)\n"
-    "- bid, ask: best bid/ask prices\n"
-    "- spread_bps: spread in basis points\n"
-    "- order_book: {bids: [{px, sz}], asks: [{px, sz}]} top 5 levels\n"
-    "- candles: {count: N, change_pct: X%, recent: [{t, T, o, h, l, c, v}, ...]} last 20 candles\n"
-    "- account: {free_collateral: X, positions: [...]}\n"
-    "- news: recent news headlines (if any)\n"
-    "- recent_track_record: your past decisions + outcomes (PnL, reasons) — use for learning\n"
-    "- allowed_decisions: [open, close, hold, skip]\n"
-    "\n"
-    "OUTPUT RULES:\n"
-    "- Respond ONLY with a single JSON object, no extra text, no markdown, no code blocks, no backticks.\n"
-    "- Fields: decision (open|close|hold|skip), side (buy|sell|null), confidence (0.0-1.0), reason (max 2 sentences).\n"
-    "- side is required only if decision='open'; otherwise set to null.\n"
-    "- confidence: 0.0-1.0. Guidelines:\n"
-    "  * 0.50-0.60: weak signal, conflicting indicators, or high uncertainty\n"
-    "  * 0.65-0.75: moderate signal, clear trend but some risk factors\n"
-    "  * >0.75: strong signal, clear trend + good liquidity + low spread\n"
-    "  * If spread_bps > 25 or book thin, cap confidence at 0.65 even if trend looks good.\n"
-    "- reason: brief explanation mentioning key factors you used (e.g., 'bullish HH/HL, +2.3% over 15 candles, spread 12bps', "
-    "or 'bearish LH/LL, RSI-like weakness on wicks, spread 30bps too wide').\n"
-    "- You NEVER choose amount, leverage, TP, SL, or asset — those come from config.\n"
-    "\n"
-    "RESPONSE FORMAT (EXACT):\n"
-    '{"decision":"open|close|hold|skip","side":"buy|sell|null","confidence":0.0-1.0,"reason":"..."}'
+    "You are the primary market analyst for io:* perpetual markets. Analyze supplied JSON context and decide open, close, hold, or skip.\n"
+    "Use only CLOSED candles in closed_15m and closed_5m; never infer from an active candle or invent missing data.\n"
+    "Analyze 15m HH/HL or LH/LL structure, momentum, consecutive closes, EMA20/EMA50 and gap, RSI14, ATR, wicks/body, pullback/reclaim, breakout quality, extension, support/resistance room. Analyze 5m structure, impulse/pullback/reclaim/breakdown, candle counts, latest close, body/wicks, and momentum for timing.\n"
+    "Consider spread, depth, imbalance, account capacity, same_coin_position, and free collateral. Prefer HOLD when mixed, late, extended, low-liquidity, near resistance/support, or timing is unclear. Never chase a vertical move.\n"
+    "If data_valid is false, output skip. If same_coin_position is true or max positions/collateral prevent entry, output hold or skip.\n"
+    "Execution context is awareness only. Never change amount_usdc, leverage, take_profit_pct, stop_loss_pct, max_hold_minutes, asset, order type, price, size, or exchange payload. Do not recommend scaling, averaging down, pyramiding, or stop changes.\n"
+    "AI has no execution authority. Deterministic validator, entry-quality veto, risk gate, and dry-run/live executor protection always apply after this response. If uncertain, output hold.\n"
+    "Respond ONLY with exactly one JSON object, no prose, markdown, or code fences. Required schema: "
+    '{"decision":"open|close|hold|skip","side":"buy|sell|null","confidence":0.0,"reason":"max 200 chars, concrete supplied-data evidence"}'
 )
 
 
 class AIError(RuntimeError):
     pass
+
+
+POSITION_PROMPT = (
+    "You are the position manager for an ALREADY-OPEN io:* perpetual position. Decide whether to keep it or close it now.\n"
+    "Use only CLOSED candles in closed_15m and closed_5m. Analyze trend structure, EMA20/EMA50, RSI14, ATR, momentum, and where price sits relative to entry, distance to the hard TP/SL, held_minutes, and unrealized PnL.\n"
+    "Output CLOSE ONLY when the evidence says the thesis has failed or momentum has clearly reversed against the position; otherwise output HOLD and let the hard TP/SL work.\n"
+    "Decide only hold or close. You may NEVER open, reverse, add to, scale, average down, or pyramid. You may NEVER change, move, widen, or cancel the hard TP/SL; those stay active and are the final authority.\n"
+    "Closing is reduce-only and never selects size, price, leverage, or order type. Deterministic close safety checks, reduce-only enforcement, and the executor protection always apply after this response. If uncertain, output hold.\n"
+    "Respond ONLY with exactly one JSON object, no prose, markdown, or code fences. Required schema: "
+    '{"decision":"hold|close","side":null,"confidence":0.0,"reason":"max 200 chars, concrete supplied-data evidence"}'
+)
+
+
+def position_ai_decision(coin, position, market_meta, book, candles, timing_candles, cfg, account=None, context=None, timeout=45):
+    """Position-manager AI. Returns only normalized HOLD/CLOSE; never entry parameters."""
+    snapshot = build_ai_market_snapshot(coin, market_meta, book, candles,
+                                        timing_candles=timing_candles, account=account, cfg=cfg)
+    if not snapshot.get("data_valid"):
+        raise AIError("invalid position snapshot")
+    ctx = build_prompt_context(coin, market_meta, book, candles, account, snapshot=snapshot)
+    ctx["active_position"] = {"side": position.get("side"), "size": position.get("size"),
+                               "entry_px": position.get("entry_px"), "mark_px": position.get("mark_px"),
+                               "unrealized_pnl": position.get("u_pnl"), "held_minutes": position.get("held_minutes"),
+                               "hard_tp": position.get("tp"), "hard_sl": position.get("sl")}
+    if context:
+        ctx["recent_track_record"] = context
+    payload = json.dumps({"model": os.getenv("AI_MODEL"), "messages": [
+        {"role": "system", "content": POSITION_PROMPT},
+        {"role": "user", "content": json.dumps(ctx)}], "temperature": 0.2, "max_tokens": 300}).encode()
+    req = urllib.request.Request(os.getenv("AI_ENDPOINT"), data=payload, method="POST",
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {os.getenv('AI_API_KEY')}"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.load(resp)
+    choice = data["choices"][0]
+    if choice.get("finish_reason") == "length":
+        raise AIError("position AI response truncated")
+    raw = _extract_json(choice["message"]["content"])
+    if not isinstance(raw, dict) or raw.get("decision") not in ("hold", "close"):
+        raise AIError("position AI decision must be hold|close")
+    conf = raw.get("confidence", 0)
+    if not isinstance(conf, (int, float)) or not 0 <= conf <= 1:
+        raise AIError("position AI confidence invalid")
+    return {"decision": raw["decision"], "side": None, "confidence": float(conf),
+            "reason": str(raw.get("reason", ""))[:200]}
+
+
+def position_monitor_due(positions, last_candle_by_coin, candles_by_coin):
+    """Return positions whose latest closed 15m candle has changed."""
+    due = []
+    from strategy.indicators.price_action import closed_candles
+    for p in positions:
+        coin = p.get("coin")
+        closed = closed_candles(candles_by_coin.get(coin) or [])
+        if not closed:
+            continue
+        latest = closed[-1].get("T", closed[-1].get("t"))
+        if latest is not None and latest != last_candle_by_coin.get(coin):
+            due.append((coin, latest))
+    return due
 
 
 def ai_configured():
@@ -95,16 +108,23 @@ def _extract_json(text):
     return json.loads(text[start:end + 1])
 
 
-def ai_decision(coin, market_meta, book, candles, cfg, account=None, news=None, timeout=45, context=None):
-    """Call AI endpoint; validate strictly; return normalized decision or raise AIError."""
-    ctx = build_prompt_context(coin, market_meta, book, candles, account, news)
+def ai_decision(coin, market_meta, book, candles, cfg, account=None, news=None, timeout=45, context=None, snapshot=None):
+    """Call AI endpoint; validate strictly; return normalized decision or raise AIError.
+
+    Retries transient 5xx/network failures once. Fail-closed caller still vetoes.
+    """
+    ctx = build_prompt_context(coin, market_meta, book, candles, account, news, snapshot=snapshot)
+    strat = cfg.get("strategy", {})
+    strat_cfg = strat if isinstance(strat, dict) else {}
     ctx["config"] = {
-        "min_confidence": cfg.get("strategy", {}).get("min_confidence"),
-        "max_spread_bps": cfg.get("strategy", {}).get("max_spread_bps"),
+        "min_confidence": strat_cfg.get("min_confidence"),
+        "max_spread_bps": strat_cfg.get("max_spread_bps"),
         "max_positions": cfg.get("position", {}).get("max_positions"),
         "amount_usdc": cfg.get("position", {}).get("amount_usdc"),
         "leverage": cfg.get("position", {}).get("leverage"),
     }
+    ctx["active_strategy"] = strat if isinstance(strat, str) else strat_cfg.get("decision_mode")
+    ctx["strategy_params"] = cfg.get("strategy_params", {})
     if context:
         ctx["recent_track_record"] = context
     payload = json.dumps({
@@ -114,7 +134,7 @@ def ai_decision(coin, market_meta, book, candles, cfg, account=None, news=None, 
             {"role": "user", "content": json.dumps(ctx)},
         ],
         "temperature": 0.2,
-        "max_tokens": 200,
+        "max_tokens": 600,
     }).encode()
     req = urllib.request.Request(
         os.getenv("AI_ENDPOINT"), data=payload, method="POST",
@@ -123,25 +143,105 @@ def ai_decision(coin, market_meta, book, candles, cfg, account=None, news=None, 
             "Authorization": f"Bearer {os.getenv('AI_API_KEY')}",
         },
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.load(resp)
+    data = None
+    last_exc = None
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.load(resp)
+            break
+        except urllib.error.HTTPError as exc:
+            last_exc = exc
+            if exc.code >= 500 and attempt == 0:
+                time.sleep(1.5)
+                continue
+            raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            last_exc = exc
+            if attempt == 0:
+                time.sleep(1.5)
+                continue
+            raise
+    if data is None:
+        raise AIError(f"AI request failed after retries: {last_exc}")
     try:
-        content = data["choices"][0]["message"]["content"]
+        choice = data["choices"][0]
+        if choice.get("finish_reason") == "length":
+            raise AIError("AI response truncated (finish_reason=length)")
+        content = choice["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
         raise AIError(f"unexpected AI response shape: {exc}") from exc
     raw = _extract_json(content)
-    return validate_ai_decision(raw, market_meta, book, cfg)
+    # Only closed candles reach validator/gates; AI cannot see/use active candle.
+    from strategy.indicators.price_action import closed_candles as _closed
+    closed_input = _closed(candles)
+    indicators = {"ema20": (ctx.get("closed_15m") or {}).get("ema20")}
+    from strategy.indicators import calculate_rsi as _calc_rsi
+    _closes = [float(c.get("c") or c.get("close") or 0) for c in closed_input]
+    _closes = [c for c in _closes if c > 0]
+    if len(_closes) >= 15:
+        indicators["rsi_series"] = _calc_rsi(_closes, 14)
+    return validate_ai_decision(raw, market_meta, book, cfg, candles=closed_input,
+                                indicators=indicators)
 
 
-def decide(coin, market_meta, book, candles, cfg, account=None, news=None):
-    """AI if configured, else heuristic. AI also gets its own recent track record."""
+def decide(coin, market_meta, book, candles, cfg, account=None, news=None, timing_candles=None):
+    """Select deterministic strategy or AI according to root ``strategy`` + ``ai_mode``."""
+    strat = cfg.get("strategy")
+    mode = cfg.get("ai_mode", "primary")
+
+    # Unknown roots fail closed; dict means legacy strategy config.
+    if not (strat in ("ai", "ohlc") or isinstance(strat, dict)):
+        return {"decision": "skip", "side": None, "confidence": 0.0,
+                "reason": f"unknown strategy: {strat}"}, "config"
+    if mode not in ("primary", "off", "veto"):
+        return {"decision": "skip", "side": None, "confidence": 0.0,
+                "reason": f"unknown ai_mode: {mode}"}, "config"
+
+    # --- AI-primary: AI is the sole signal generator, no OHLC/5m precondition ---
+    if strat == "ai" and mode == "primary":
+        snapshot = build_ai_market_snapshot(
+            coin, market_meta, book, candles, timing_candles=timing_candles,
+            account=account, cfg=cfg)
+        if not snapshot.get("data_valid"):
+            return {"decision": "skip", "side": None, "confidence": 0.0,
+                    "reason": "invalid or missing market snapshot data"}, "ai_primary_data_error"
+        try:
+            ai_sig = ai_decision(coin, market_meta, book, candles, cfg, account, news,
+                                 context=recent_context(coin), snapshot=snapshot)
+            return ai_sig, "ai_primary"
+        except Exception as exc:
+            print(f"[ai_primary] ERROR for {coin}: {type(exc).__name__}: {exc}")
+            return {"decision": "skip", "side": None, "confidence": 0.0,
+                    "reason": f"AI primary unavailable ({type(exc).__name__})"}, "ai_primary_error"
+
+    candidate = fallback_decision(market_meta, book, candles, cfg, timing_candles)
+    if mode == "off":
+        return candidate, "strategy"
+    if mode == "veto":
+        if candidate.get("decision") != "open":
+            return candidate, "strategy_veto_no_candidate"
+        try:
+            ai_sig = ai_decision(coin, market_meta, book, candles, cfg, account, news,
+                                 context=recent_context(coin))
+            if ai_sig.get("decision") != "open" or ai_sig.get("side") != candidate.get("side"):
+                return {"decision": "hold", "side": None, "confidence": 0.0,
+                        "reason": "AI veto: disagreement with OHLC candidate"}, "ai_veto"
+            return ai_sig, "ai_veto_agree"
+        except Exception as exc:
+            print(f"[ai_veto] ERROR for {coin}: {type(exc).__name__}: {exc}")
+            return {"decision": "hold", "side": None, "confidence": 0.0,
+                    "reason": f"AI veto: unavailable ({type(exc).__name__}: {exc})"}, "ai_veto_error"
+    if mode not in ("primary", "off", "veto"):
+        return {"decision": "skip", "side": None, "confidence": 0.0,
+                "reason": f"unknown ai_mode: {mode}"}, "config"
     if ai_configured():
         try:
             return ai_decision(coin, market_meta, book, candles, cfg, account, news,
                                context=recent_context(coin)), "ai"
         except Exception as exc:
-            return fallback_decision(market_meta, book, candles, cfg), f"ai_failed:{exc}"
-    return fallback_decision(market_meta, book, candles, cfg), "heuristic"
+            return candidate, f"ai_failed:{exc}"
+    return candidate, "heuristic"
 
 
 def recent_context(coin=None, limit=8):

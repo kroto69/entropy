@@ -66,7 +66,7 @@ def user_fills(address, timeout=20):
     return _info({"type": "userFills", "user": address}, timeout=timeout)
 
 
-def candles_snapshot(coin, interval="15m", lookback_minutes=600, timeout=20):
+def candles_snapshot(coin, interval="15m", lookback_minutes=900, timeout=20):
     end = int(time.time() * 1000)
     start = end - lookback_minutes * 60_000
     return _info(
