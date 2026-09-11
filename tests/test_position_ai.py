@@ -10,6 +10,9 @@ def candle(t, close=100):
 
 def main():
     from strategy.ai import position_monitor_due, position_ai_decision
+    import main
+    assert main.SCREENING_INTERVAL_SECONDS == 30 * 60
+    assert main.POSITION_MONITOR_TICK_SECONDS == 20 * 60
 
     positions = [{"coin": "io:ANTH"}]
     candles = {"io:ANTH": [candle(1000), candle(2000)]}

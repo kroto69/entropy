@@ -23,8 +23,8 @@ from core.env import load_env as executor_load_env
 
 executor_load_env()
 CYCLE_INTERVAL = 10 * 60
-SCREENING_INTERVAL_SECONDS = 20 * 60
-POSITION_MONITOR_TICK_SECONDS = 60
+SCREENING_INTERVAL_SECONDS = 30 * 60
+POSITION_MONITOR_TICK_SECONDS = 20 * 60
 _close_lock = threading.Lock()
 _position_last_candle = {}
 _position_close_lock = threading.Lock()  # prevents screening/monitor double-close races
