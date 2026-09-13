@@ -24,10 +24,10 @@ SYSTEM_PROMPT = (
     "You are the primary market analyst for io:* perpetual markets. Analyze supplied JSON context and decide open, close, hold, or skip.\n"
     "Use only CLOSED candles in closed_15m and closed_5m; never infer from an active candle or invent missing data.\n"
     "Analyze 15m HH/HL or LH/LL structure, momentum, consecutive closes, EMA20/EMA50 and gap, RSI14, ATR, wicks/body, pullback/reclaim, breakout quality, extension, support/resistance room. Analyze 5m structure, impulse/pullback/reclaim/breakdown, candle counts, latest close, body/wicks, and momentum for timing.\n"
-    "Consider spread, depth, imbalance, account capacity, same_coin_position, and free collateral. Prefer HOLD when mixed, late, extended, low-liquidity, near resistance/support, or timing is unclear. Never chase a vertical move.\n"
+    "Consider spread, depth, imbalance, account capacity, same_coin_position, and free collateral. Prefer OPEN when there is a clear directional edge with acceptable risk, even if the setup is late or extended. Only output HOLD when signals genuinely conflict or data is missing; do not require a perfect setup. Still avoid chasing a pure vertical spike with no pullback.\n"
     "If data_valid is false, output skip. If same_coin_position is true or max positions/collateral prevent entry, output hold or skip.\n"
     "Execution context is awareness only. Never change amount_usdc, leverage, take_profit_pct, stop_loss_pct, max_hold_minutes, asset, order type, price, size, or exchange payload. Do not recommend scaling, averaging down, pyramiding, or stop changes.\n"
-    "AI has no execution authority. Deterministic validator, entry-quality veto, risk gate, and dry-run/live executor protection always apply after this response. If uncertain, output hold.\n"
+    "AI has no execution authority. Deterministic validator, entry-quality veto, risk gate, and dry-run/live executor protection always apply after this response. When uncertain, choose the side with the clearer edge and output open; reserve hold only for genuinely conflicting or missing data.\n"
     "Respond ONLY with exactly one JSON object, no prose, markdown, or code fences. Required schema: "
     '{"decision":"open|close|hold|skip","side":"buy|sell|null","confidence":0.0,"reason":"max 200 chars, concrete supplied-data evidence"}'
 )
@@ -266,7 +266,8 @@ def recent_context(coin=None, limit=8):
         rows = rows[-limit:]
     out = []
     for r in rows:
-        if r.get("type") not in ("open", "close", "decision", "no_fill"):
+        if r.get("type") not in ("open", "close", "decision", "no_fill",
+                                 "sim_open", "sim_trade_result", "sim_position_decision"):
             continue
         item = {"t": r.get("type"), "coin": r.get("coin"),
                 "side": r.get("side"), "conf": r.get("confidence"),
@@ -276,6 +277,8 @@ def recent_context(coin=None, limit=8):
             item["pnl"] = round(r["pnl"], 4)
         if r.get("risk"):
             item["risk"] = r["risk"]
+        if r.get("is_simulated"):
+            item["simulated"] = True
         out.append(item)
     return out
 

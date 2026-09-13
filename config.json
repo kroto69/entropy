@@ -1,10 +1,16 @@
 {
-  "markets": ["io:ANTH", "io:SNDK", "io:NBIS", "io:GPRO", "io:OAI"],
+  "markets": [
+    "io:ANTH",
+    "io:SNDK",
+    "io:NBIS",
+    "io:GPRO",
+    "io:OAI"
+  ],
   "strategy": "ai",
   "ai_mode": "primary",
   "strategy_params": {
-    "min_confidence": 0.65,
-    "max_spread_bps": 25.0
+    "min_confidence": 0.45,
+    "max_spread_bps": 35.0
   },
   "position": {
     "amount_usdc": 30.5,

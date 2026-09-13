@@ -20,6 +20,10 @@ from report.telegram import (send, send_report, format_decision, format_position
 from report.learning import record as learning_record
 from core.protection import prices as protection_prices
 from core.env import load_env as executor_load_env
+from core.sim_ledger import open_sim, load_sim, close_sim, mark_to_market, repair_protection, CLOSED
+from core.sim_account import account as sim_account, record_close as sim_record_close, load as sim_account_load
+from datetime import datetime, timezone
+from collections import Counter
 
 executor_load_env()
 CYCLE_INTERVAL = 10 * 60
@@ -167,6 +171,11 @@ def report_positions(mode, account=None):
             f"{r['coin']} {r['side'].upper()} sz={r['size']} entry={r['entry_px']} "
             f"uPnL={r['u_pnl']:+.4f} margin={r['margin_used']:.4f} held={held} "
             f"TP={r['tp'] or '-'} SL={r['sl'] or '-'}")
+    sim_positions = [mark_to_market(c, live_price(c)) for c in load_sim()]
+    sim_positions = [p for p in sim_positions if p]
+    for r in sim_positions:
+        lines.append(f"SIM {r['coin']} {r['side'].upper()} sz={r['size']} entry={r['entry_px']} "
+                     f"uPnL={r['u_pnl']:+.4f} held={r['held_minutes']}m TP={r['tp']} SL={r['sl']}")
     msg = "\n".join(lines)
     print(msg)
     rep = {"open_positions": rep["open_positions"], "positions": rep["positions"],
@@ -276,6 +285,59 @@ def _position_ai_tick(cfg, mode, account):
             _position_last_candle[coin] = locals().get("candle_id", _position_last_candle.get(coin))
 
 
+def _sim_lifecycle(cfg, mode):
+    """Mark simulated positions to TP/SL/max-hold and let Position AI close them."""
+    for coin, p in list(load_sim().items()):
+        try:
+            mark = live_price(coin)
+            if not mark:
+                continue
+            try:
+                float(p["tp"]); float(p["sl"])
+            except (TypeError, ValueError):
+                prot = protection_prices(float(p["entry_px"]), p["side"],
+                                         cfg["position"]["take_profit_pct"],
+                                         cfg["position"]["stop_loss_pct"],
+                                         price_decimals=tick_decimals(coin),
+                                         leverage=int(cfg["position"].get("leverage", 1)))
+                repair_protection(coin, prot["take_profit"], prot["stop_loss"])
+                p["tp"], p["sl"] = prot["take_profit"], prot["stop_loss"]
+            side = p["side"]
+            hit_tp = (side == "buy" and mark >= float(p["tp"])) or (side == "sell" and mark <= float(p["tp"]))
+            hit_sl = (side == "buy" and mark <= float(p["sl"])) or (side == "sell" and mark >= float(p["sl"]))
+            held = (time.time() - p["opened_at"]) / 60
+            reason = "simulated_take_profit" if hit_tp else "simulated_stop_loss" if hit_sl else None
+            if not reason and p.get("max_hold_minutes", 0) and held >= p["max_hold_minutes"]:
+                reason = "simulated_max_hold"
+            if reason:
+                row = close_sim(coin, mark, reason)
+                if row:
+                    sim_record_close(row["pnl"])
+                    learning_record(row)
+                telegram_notify_html(f"📊 <b>SIM POSITION CLOSED</b>\n<b>{esc(coin)}</b>\n"
+                                     f"Reason: {esc(reason)}\nPnL: {row['pnl']:+.4f}\n"
+                                     f"Order sent: NO")
+                continue
+            closed = candles_snapshot(coin)
+            timing = candles_snapshot(coin, interval="5m", lookback_minutes=60)
+            sig = position_ai_decision(coin, mark_to_market(coin, mark), resolve_market(coin),
+                                       book_view(coin), closed, timing, cfg,
+                                       account={"positions": []}, context=ai_recent_context(coin))
+            learning_record({"type": "sim_position_decision", "strategy": "ai_position",
+                             "coin": coin, "decision": sig["decision"], "confidence": sig["confidence"],
+                             "reason": sig["reason"], "u_pnl": mark_to_market(coin, mark)["u_pnl"],
+                             "is_simulated": True})
+            if sig["decision"] == "close":
+                row = close_sim(coin, mark, "simulated_ai_close")
+                learning_record(row)
+                telegram_notify_html(f"📊 <b>SIM POSITION AI CLOSE</b>\n<b>{esc(coin)}</b>\n"
+                                     f"Reason: {esc(sig['reason'])}\nPnL: {row['pnl']:+.4f}\n"
+                                     f"Order sent: NO")
+        except Exception as exc:
+            learning_record({"type": "sim_position_error", "coin": coin,
+                             "reason": f"{type(exc).__name__}: {exc}", "is_simulated": True})
+
+
 def monitor_positions(cfg, mode):
     """Tick every minute: native protection + Position AI on each new 15m close."""
     address = os.getenv("HL_ACCOUNT_ADDRESS")
@@ -288,6 +350,7 @@ def monitor_positions(cfg, mode):
     ensure_live_protection(cfg, account)
     if account.get("positions"):
         _position_ai_tick(cfg, mode, account)
+    _sim_lifecycle(cfg, mode)
     for p in account.get("positions", []):
         coin = p.get("coin")
         opened_at = meta.get(coin, {}).get("opened_at")
@@ -311,7 +374,10 @@ def cycle(coin, cfg, mode, notify=True):
         # Missing 5m data must fail closed after any primary open signal.
         timing_candles = []
     address = os.getenv("HL_ACCOUNT_ADDRESS")
-    account = account_summary(address) if address else {"free_collateral": 0, "positions": []}
+    if executor_is_live():
+        account = account_summary(address) if address else {"free_collateral": 0, "positions": []}
+    else:
+        account = sim_account(load_sim(), int(cfg["position"].get("leverage", 1)))
     strategy_mode = cfg.get("strategy")
     ai_mode = cfg.get("ai_mode")
     sig, decision_source = decide(coin, meta, book, candles, cfg, account,
@@ -372,6 +438,27 @@ def cycle(coin, cfg, mode, notify=True):
         result["sig"] = sig
         result["decision_source"] = decision_source
         result["protection"] = "SKIPPED_DRYRUN"
+        # Record the virtual position so dry-run has a real PnL lifecycle.
+        entry_px = float(intent_dict["price"])
+        protection = protection_prices(
+            entry_px, sig["side"], intent_dict["take_profit_pct"],
+            intent_dict["stop_loss_pct"], price_decimals=tick_decimals(coin),
+            leverage=int(cfg["position"].get("leverage", 1)))
+        tp_px = protection["take_profit"]
+        sl_px = protection["stop_loss"]
+        pos_cfg = cfg["position"]
+        open_sim(coin, sig["side"], intent_dict["size"], entry_px, tp_px, sl_px,
+                 sig.get("confidence"), str(sig.get("reason", ""))[:150],
+                 decision_source, pos_cfg["amount_usdc"], pos_cfg.get("leverage", 1),
+                 pos_cfg.get("max_hold_minutes", 240))
+        learning_record({"type": "sim_open", "coin": coin, "side": sig["side"],
+                         "entry_px": entry_px, "size": intent_dict["size"],
+                         "tp": tp_px, "sl": sl_px, "confidence": sig.get("confidence"),
+                         "reason": str(sig.get("reason", ""))[:150],
+                         "source": decision_source, "is_simulated": True})
+        result["entry_px"] = entry_px
+        result["sim_tp"] = tp_px
+        result["sim_sl"] = sl_px
         return result
 
     executor = Executor()
@@ -445,6 +532,63 @@ def current_positions_report():
         return None
 
 
+def sim_history_rows(limit=10):
+    if not CLOSED.exists():
+        return []
+    rows = []
+    for line in CLOSED.read_text().splitlines():
+        try:
+            row = json.loads(line)
+            if row.get("type") == "sim_trade_result":
+                rows.append(row)
+        except (ValueError, TypeError):
+            continue
+    return rows[-limit:]
+
+
+def sim_report_html():
+    positions = []
+    for coin in load_sim():
+        mark = live_price(coin)
+        row = mark_to_market(coin, mark) if mark else None
+        if row:
+            positions.append(row)
+    lines = ["📊 <b>SIMULATED POSITIONS</b>"]
+    if not positions:
+        lines.append("📭 Tidak ada posisi virtual aktif.")
+    for p in positions:
+        lines.append(f"<b>{esc(p['coin'])}</b> {esc(p['side'].upper())} | "
+                     f"Entry: {p['entry_px']} | Mark: {p['mark_px']}\n"
+                     f"uPnL: <b>{p['u_pnl']:+.4f}</b> | Held: {p['held_minutes']}m\n"
+                     f"TP: {p['tp']} | SL: {p['sl']}")
+    rows = sim_history_rows(100000)
+    pnl = sum(float(r.get("pnl") or 0) for r in rows)
+    wins = sum(float(r.get("pnl") or 0) > 0 for r in rows)
+    losses = sum(float(r.get("pnl") or 0) < 0 for r in rows)
+    raw_sim = load_sim()
+    acct = sim_account(raw_sim, 5)
+    acct['account_value'] += sum(float(p.get('u_pnl') or 0) for p in positions)
+    acct['free_collateral'] += sum(float(p.get('u_pnl') or 0) for p in positions)
+    lines += ["", "📈 <b>SIM SUMMARY</b>",
+              f"Virtual equity: <b>{acct['account_value']:.2f}</b> USDC | Free: {acct['free_collateral']:.2f}",
+              f"Closed: {len(rows)} | Wins: {wins} | Losses: {losses}",
+              f"Net PnL: <b>{pnl:+.4f}</b> USDC"]
+    return "\n".join(lines)
+
+
+def sim_history_html(limit=10):
+    rows = sim_history_rows(limit)
+    lines = [f"📚 <b>SIM HISTORY</b> (last {limit})"]
+    if not rows:
+        return lines[0] + "\nBelum ada simulated trade closed."
+    for r in reversed(rows):
+        pnl = float(r.get("pnl") or 0)
+        icon = "✅" if pnl > 0 else "❌" if pnl < 0 else "➖"
+        lines.append(f"{icon} <b>{esc(r.get('coin'))}</b> {esc(str(r.get('side','')).upper())} "
+                     f"PnL: <b>{pnl:+.4f}</b> | {esc(r.get('exit_reason'))}")
+    return "\n".join(lines)
+
+
 def handle_update(update, mode):
     """Handle commands only from configured Telegram chat."""
     msg = update.get("message") or {}
@@ -456,7 +600,11 @@ def handle_update(update, mode):
         return
     if msg:
         text = (msg.get("text") or "").strip()
-        if text.startswith("/pos"):
+        if text.startswith("/simhist"):
+            telegram_notify_html(sim_history_html())
+        elif text.startswith("/sim"):
+            telegram_notify_html(sim_report_html())
+        elif text.startswith("/pos"):
             rep = current_positions_report()
             if rep:
                 telegram_notify_html(format_positions_html(rep), close_buttons(rep["positions"]))
@@ -474,7 +622,9 @@ def handle_update(update, mode):
                                 f"free={rep['free_collateral']:.2f} "
                                 f"coins={[p['coin'] for p in rep['positions']]}")
         elif text.startswith("/help"):
-            telegram_notify("Command:\n/pos — posisi + tombol close\n"
+            telegram_notify("Command:\n/pos — posisi nyata + tombol close\n"
+                            "/sim — posisi virtual + uPnL + summary\n"
+                            "/simhist — 10 hasil simulated terakhir\n"
                             "/status — ringkas\n/close io:COIN — tutup manual")
     elif cbq:
         data = cbq.get("data") or ""
